@@ -1,0 +1,388 @@
+좋다, 이제 “제일 아래까지 화살표가 내려가게” 만들자 😊
+
+요청한 대로:
+
+* UC-01~UC-04에 필요한 것만 유지
+* 서버별 / 레이어별로
+* 각 컴포넌트가 **Provided / Required 인터페이스**
+* 특히 **맨 아래 Infra 컴포넌트가 어떤 external 추상 인터페이스(IDbQuery 등)를 Required** 하는지까지 명시
+
+코드가 아니라 **EA 다이어그램 그릴 때 참고하는 설계 설명** 형태로 쓸게.
+
+---
+
+## 공통: 최하단(External) 추상 인터페이스
+
+아래 것들은 실제 DB 드라이버/HTTP 클라이언트/카프카 클라이언트/OS 스케줄러를 감싸는 “플랫폼 인터페이스”라고 보면 된다.
+
+```text
+interface IDbQuery {
+  Result execute(sql: string, params?: any[])
+  Rows   query(sql: string, params?: any[])
+}
+
+interface ITimeSeriesDbClient {
+  Result write(metric: string, tags: map, fields: map, time: Timestamp)
+  Rows   query(queryText: string)
+}
+
+interface IKafkaProducer {
+  Result send(topic: string, key: string, value: any)
+}
+
+interface IKafkaConsumer {
+  void subscribe(topic: string, handler: (key: string, value: any) -> void)
+}
+
+interface IRestClient {
+  HttpResponse request(method: string, url: string, body?: any, headers?: map)
+}
+
+interface ISystemScheduler {
+  void scheduleEveryMinute(handler: () -> void)
+}
+```
+
+이제 서버별로 내려가 보자.
+
+---
+
+## 1. HVAC Server (UC-01 환경수신, UC-02 공조제어)
+
+### 1) Presentation Layer
+
+**컴포넌트: `HVACApiController`**
+
+* **Provided**
+
+  * `IHVACControlAPI`
+
+    * `Result requestImmediateControl(WarehouseId)`
+    * `ControlStatus getControlStatus(WarehouseId, ZoneId?)`
+  * `IHVACStatusAPI`
+
+    * `ControlStatus getLastControlResult(CommandId)`
+* **Required**
+
+  * `IHVACControlService`
+  * `IHVACStatusQueryService`
+
+(→ EA 다이어그램에서 위에 두 인터페이스 아이콘, 아래에 Controller 컴포넌트, 아래로 App 레이어 서비스들에 required 연결)
+
+---
+
+### 2) Application Layer
+
+**a. `HVACControlService`**
+
+* **Provided**
+
+  * `IHVACControlService`
+
+    * `Result requestHVACControl(WarehouseId)`
+  * `IEnvSampleEventHandler` (콜백)
+
+    * `void onEnvSample(SensorId, EnvSampleIn)`
+* **Required**
+
+  * `IEnvSampleSubscription`        (초기 콜백 등록)
+  * `IHVACDeviceConfigRepository`   (센서→장치/창고 매핑, 장치 목록)
+  * `IPolicyReferenceRepository`    (ControlPolicy 조회)
+  * `IEnvTimeseriesRepository_HVAC` (Env 저장/조회)
+  * `ISetpointCalculationService`
+  * `IDeviceCommandService`
+  * `IControlHistoryRepository_HVAC`
+  * `IPushClient` (에러 알림)
+
+**b. `HVACStatusQueryService`**
+
+* **Provided**
+
+  * `IHVACStatusQueryService`
+
+    * `ControlStatus getStatus(WarehouseId, ZoneId?)`
+    * `ControlStatus getByCommandId(CommandId)`
+* **Required**
+
+  * `IControlHistoryRepository_HVAC`
+  * `IHVACDeviceConfigRepository`
+
+**c. `SetpointCalculationService`**
+
+* **Provided**
+
+  * `ISetpointCalculationService`
+
+    * `ControlCommand[] calculate(EnvSample, ControlPolicy, Device[])`
+* **Required**
+
+  * (옵션) `IEnvTimeseriesRepository_HVAC`
+
+**d. `DeviceCommandService`**
+
+* **Provided**
+
+  * `IDeviceCommandService`
+
+    * `Result executeCommands(ControlCommand[] cmds)`
+* **Required**
+
+  * `IDeviceCommandPublishing`       (카프카로 명령 발행 시)
+  * `ISamsungHVACClient`
+  * `ILGHVACClient`
+  * `IControlHistoryRepository_HVAC`
+
+---
+
+### 3) Infrastructure Layer (HVAC)
+
+여기가 질문한 “최하단 Required” 포인트.
+
+**a. `BrokerGatewayForHVAC`**
+
+* **Provided (위 App에 제공)**
+
+  * `IEnvSampleSubscription`
+
+    * `void registerEnvSampleHandler(IEnvSampleEventHandler h)`
+  * `IDeviceCommandPublishing`
+
+    * `Result publishDeviceCommand(ControlCommand cmd)`
+* **Required (플랫폼)**
+
+  * `IKafkaConsumer`  (센서 토픽 구독)
+  * `IKafkaProducer`  (제어명령 토픽 발행)
+
+**b. `HVACMasterDBAccess`**
+
+* **Provided**
+
+  * `IHVACDeviceConfigRepository`
+
+    * `Device? findBySensorId(SensorId)`
+    * `Device[] findByWarehouse(WarehouseId)`
+  * `IPolicyReferenceRepository`
+
+    * `ControlPolicy? getPolicy(WarehouseId, ZoneId)`
+* **Required**
+
+  * `IDbQuery` (RDBMS 접속: Master DB)
+
+**c. `HVACTimeseriesDBAccess`**
+
+* **Provided**
+
+  * `IEnvTimeseriesRepository_HVAC`
+
+    * `Result saveEnv(EnvSample)`
+    * `EnvSample? getLatest(WarehouseId, ZoneId)`
+  * `IControlHistoryRepository_HVAC`
+
+    * `Result save(ControlStatus)`
+    * `ControlStatus? findByCommandId(CommandId)`
+    * `ControlStatus[] listByWarehouse(WarehouseId, TimeRange)`
+* **Required**
+
+  * `ITimeSeriesDbClient` (InfluxDB 등)
+
+**d. Vendor Clients**
+
+* `SamsungHVACClient`
+
+  * **Provided**: `ISamsungHVACClient.send(ControlCommand[] cmds): Result`
+  * **Required**: `IRestClient` (삼성 API 엔드포인트)
+* `LGHVACClient`
+
+  * **Provided**: `ILGHVACClient.send(ControlCommand[] cmds): Result`
+  * **Required**: `IRestClient`
+* `PushClient`
+
+  * **Provided**: `IPushClient.send(msg, target): PushResult`
+  * **Required**: `IRestClient` (카카오톡/FCM 등 Push 서버)
+
+EA 도식으로는:
+App 레이어 →(required) Repo/Client 인터페이스 → Infra 컴포넌트 →(required) IDbQuery/IKafka/IRest 같은 최하단 노드(외부 시스템).
+
+---
+
+## 2. Monitoring Server (UC-03/04 Heartbeat)
+
+### 1) Presentation Layer
+
+**`MonitoringApiController`**
+
+* **Provided**
+
+  * `IMonitoringQueryAPI`
+
+    * `DeviceStatus[] getDeviceStatuses(WarehouseId)`
+    * `Heartbeat[] getHeartbeatHistory(WarehouseId, DeviceId, TimeRange)`
+  * `IAlarmQueryAPI`
+
+    * `Alarm[] getActiveAlarms(WarehouseId?)`
+    * `Alarm[] getAlarmHistory(WarehouseId?, TimeRange?)`
+* **Required**
+
+  * `IMonitoringQueryService`
+  * `IAlarmManagementService`
+
+---
+
+### 2) Application Layer
+
+**a. `DeviceHealthCheckScheduler`**
+
+* **Provided**
+
+  * `I1MinTickListener`
+
+    * `void on1MinTick()`
+* **Required**
+
+  * `I1MinTimerRegistration`       (TimerGateway)
+  * `IDeviceHealthCheckService`    (tick시 호출)
+
+**b. `DeviceHealthCheckService`**
+
+* **Provided**
+
+  * `IDeviceHealthCheckService`
+
+    * `void checkAllDevices()`
+* **Required**
+
+  * `IMonDeviceConfigRepository`      (모니터링 대상 장치 목록)
+  * `ISamsungHVACStatusClient`
+  * `ILGHVACStatusClient`
+  * `IDeviceHeartbeatRepository`
+  * `IAlarmManagementService`        (DOWN 시 알람 위임)
+
+**c. `AlarmManagementService`**
+
+* **Provided**
+
+  * `IAlarmManagementService`
+
+    * `Alarm raiseDeviceDown(Device)`
+    * `Result closeIfRecovered(Device)`
+    * `Alarm[] getActiveAlarms(WarehouseId?)`
+    * `Alarm[] getAlarmHistory(WarehouseId?, TimeRange?)`
+* **Required**
+
+  * `IPushClient`
+  * `IDeviceStatusHistoryRepository`
+
+**d. `MonitoringQueryService`**
+
+* **Provided**
+
+  * `IMonitoringQueryService`
+
+    * `DeviceStatus[] getDeviceStatuses(WarehouseId)`
+    * `Heartbeat[] getHeartbeatHistory(WarehouseId, DeviceId, TimeRange)`
+* **Required**
+
+  * `IDeviceHeartbeatRepository`
+  * `IDeviceStatusHistoryRepository`
+
+---
+
+### 3) Infrastructure Layer (Monitoring)
+
+**a. `TimerGateway`**
+
+* **Provided**
+
+  * `I1MinTimerRegistration`
+
+    * `void register(I1MinTickListener listener)`
+* **Required**
+
+  * `ISystemScheduler` (OS/플랫폼 타이머)
+
+**b. `MonMasterDBAccess`**
+
+* **Provided**
+
+  * `IMonDeviceConfigRepository`
+
+    * `Device[] listAllMonitoredDevices()`
+* **Required**
+
+  * `IDbQuery` (모니터링용 Master DB)
+
+**c. `MonTimeseriesDBAccess`**
+
+* **Provided**
+
+  * `IDeviceHeartbeatRepository`
+
+    * `Result save(Heartbeat)`
+    * `Heartbeat[] list(WarehouseId, DeviceId, TimeRange)`
+  * `IDeviceStatusHistoryRepository`
+
+    * `Result save(DeviceStatus)`
+    * `DeviceStatus[] list(WarehouseId?, TimeRange?)`
+* **Required**
+
+  * `ITimeSeriesDbClient`
+
+**d. Vendor Status Clients**
+
+* `SamsungHVACStatusClient`
+
+  * **Provided**: `ISamsungHVACStatusClient.getStatus(Device): DeviceStatus`
+  * **Required**: `IRestClient`
+* `LGHVACStatusClient`
+
+  * **Provided**: `ILGHVACStatusClient.getStatus(Device): DeviceStatus`
+  * **Required**: `IRestClient`
+
+**e. `PushClient`**
+
+* **Provided**: `IPushClient.send(message, target): PushResult`
+* **Required**: `IRestClient` (Push 서버)
+
+---
+
+## 3. Master/Ops 쪽 (UC-01~04 범위에서 필요한 것만)
+
+HVAC/Monitoring 서버 입장에서 보면 “외부 시스템/DB 노드” 역할.
+
+**a. `ZoneProfileRepository` / `WarehouseDeviceRepository` (Master DB)**
+
+* **Provided** (MasterDBAccess 등에서 구현)
+
+  * `ControlPolicy? getPolicy(WarehouseId, ZoneId)`
+  * `Device? findBySensorId(SensorId)`
+  * `Device[] findByWarehouse(WarehouseId)`
+* **Required**
+
+  * `IDbQuery`
+
+EA 다이어그램에서:
+
+* HVAC/Monitoring 서버의 Repo 컴포넌트 →(required) `IDbQuery` → Master DB 노드
+* HVAC 서버의 BrokerGateway →(required) `IKafka...` → Kafka 노드
+* Monitoring 서버의 TimerGateway →(required) `ISystemScheduler` → OS Scheduler 노드
+* Vendor/Push Client →(required) `IRestClient` → 각 Vendor/Push 노드
+
+이렇게 그리면 “각 노드의 최하단 Required 인터페이스가 외부 시스템과 어떤 식으로 연결되는지”가 한눈에 보이고, 심사 때도
+
+> 상위(App)는 Infra 인터페이스만 알고, Infra는 다시 IDbQuery/IKafka/IRest 같은 하위 플랫폼에 의존한다
+
+는 구조를 명확히 설명할 수 있어.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
