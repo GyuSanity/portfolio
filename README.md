@@ -1,1059 +1,936 @@
-좋다, 이제 이 버전을 “문서에 바로 넣을 수 있는 수준”으로 정리해볼게.
-형식은:
+좋아, 이제 진짜 “콜백 패턴까지 포함해서 레이어 규칙 안 어긋나는 버전”으로 다시 정리해줄게.
+요점은 두 가지야:
 
-* 서버별 3계층 컴포넌트 구성
-* 각 컴포넌트가 **위/아래 어떤 인터페이스를 제공/사용하는지**
-* 각 인터페이스에 대해
+1. **정적 의존성(컴포넌트/인터페이스 화살표)은 항상 상 → 하**
+2. 이벤트/타이머/Kafka 소비처럼 “실행 시점에 하위에서 상위로 올라오는 것처럼 보이는 것”은
+   **상위가 콜백 인터페이스를 제공하고, 하위가 그걸 호출하는 Callback 패턴으로 표현**
 
-  * 주요 오퍼레이션 시그니처
-  * 필요한 핵심 DataType / Enum
-  * 인터페이스 역할
+아래에 서버별로:
 
-공통 타입은 마지막에 모아서 적을게.
+* 컴포넌트 목록
+* 각 인터페이스가 어느 레이어에 있고,
+* 누가 누구를 (상→하) 참조하는지,
+* 콜백은 어떻게 표현하는지
 
----
-
-## 1. 와인셀러 공조 시스템 서버
-
-### L1. Presentation / API
-
-#### 1) AdminConfigFacade
-
-* **Provides**
-
-  * `IAdminConfigService`
-* **Uses**
-
-  * `IPolicyManagement`
-  * `IZoneProfileManagement`
-  * `IEquipmentRegistration`
-* **IAdminConfigService**
-
-  * `createWarehouseProfile(cmd: CreateWarehouseProfileCmd): void`
-  * `updateWarehouseProfile(cmd: UpdateWarehouseProfileCmd): void`
-  * `registerDevice(cmd: RegisterDeviceCmd): void`
-  * `updateDevice(cmd: UpdateDeviceCmd): void`
-* **역할**
-
-  * 관리자 UI/API 진입점. 마스터/정책 관련 요청을 L2 서비스에 위임.
-
-#### 2) OperatorViewFacade
-
-* **Provides**
-
-  * `IOperatorViewService`
-* **Uses**
-
-  * `IPolicyQuery`
-  * `IReportQuery`
-* **IOperatorViewService**
-
-  * `getZoneProfile(zoneId: ZoneId): ZoneProfile`
-  * `getPolicies(filter: PolicyQuery): PolicySummaryList`
-  * `getReports(query: KpiQuery): KpiSummary`
-* **역할**
-
-  * 운영자 조회 전용 파사드.
-
-#### 3) WarehouseIntegrationAPI
-
-* **Provides**
-
-  * `IWarehouseIntegrationAPI`
-* **Uses**
-
-  * `IInventoryIntegration`
-* **IWarehouseIntegrationAPI**
-
-  * `notifyInbound(event: InboundEvent): Ack`
-  * `notifyOutbound(event: OutboundEvent): Ack`
-* **역할**
-
-  * 창고 WMS와의 입출고 이벤트 연동 진입점.
+까지 한 번에 볼 수 있게 정리했다.
 
 ---
 
-### L2. Business
+## 1. 와인 공조 운영 서버 (Wine Cellar Ops Server)
 
-#### 1) PolicyManagementService
+**역할:** 정책/장치/창고정보/리포트. **브로커 직접 사용 안 함.** MasterDB + TSDB만 사용.
 
-* **Provides**
+### Presentation Layer
 
-  * `IPolicyManagement`
-  * `IPolicyQuery`
-* **Uses**
+* `OpsApiFrontController`
 
-  * `IPolicyRepositoryDAC`
-* **IPolicyManagement**
+  * 단순 라우팅 (1:1 매핑)
+* Controllers (각각 1:1 API)
 
-  * `savePolicy(cmd: SavePolicyCmd): void`
-  * `disablePolicy(policyId: PolicyId): void`
-* **IPolicyQuery**
+  * `EnvMonitoringController` : `IEnvMonitoringAPI`
+  * `ControlPolicyController` : `IControlPolicyAPI`
+  * `InventoryController` : `IInventoryAPI`
+  * `AlarmPolicyController` : `IAlarmPolicyAPI`
+  * `DeviceConfigController` : `IDeviceConfigAPI`
 
-  * `getPolicy(policyId: PolicyId): Policy`
-  * `findPolicies(filter: PolicyQuery): PolicySummaryList`
-* **역할**
+**상→하 관계**
 
-  * 공조 정책 수명주기 관리, 조회.
+* `OpsApiFrontController` → 각 `I*API`
+* 각 Controller → 아래 Application 서비스 인터페이스
 
-#### 2) ZoneProfileService
+### Application Layer
 
-* **Provides**
+* `EnvStatusQueryService` : `IEnvStatusQueryService`
+* `ZoneProfileService` : `IZoneProfileService`
+* `ControlPolicyService` : `IControlPolicyService`
+* `InventoryEventService` : `IInventoryEventService`
+* `AlarmRuleService` : `IAlarmRuleService`
+* `DeviceConfigService` : `IDeviceConfigService`
+  (장치/존 매핑, 제조사, 인터페이스 타입 관리)
 
-  * `IZoneProfileManagement`
-* **Uses**
+**상→하 관계**
 
-  * `IZoneRepositoryDAC`
-* **IZoneProfileManagement**
+* `EnvMonitoringController` → `IEnvStatusQueryService`
+* `ControlPolicyController` → `IZoneProfileService`, `IControlPolicyService`
+* `InventoryController` → `IInventoryEventService`
+* `AlarmPolicyController` → `IAlarmRuleService`
+* `DeviceConfigController` → `IDeviceConfigService`
 
-  * `saveZoneProfile(cmd: SaveZoneProfileCmd): void`
-  * `getZoneProfile(zoneId: ZoneId): ZoneProfile`
-* **역할**
+### Infrastructure Layer
 
-  * 창고/존 설정 관리.
+* Master DB Repos
 
-#### 3) EquipmentRegistrationService
+  * `MasterDBAccess` :
 
-* **Provides**
+    * `IZoneProfileRepository`
+    * `IWarehouseDeviceRepository`
+    * `IInventoryRepository`
+    * `IAlarmRuleRepository`
+* TS DB Repos
 
-  * `IEquipmentRegistration`
-* **Uses**
+  * `TimeseriesDBAccess` :
 
-  * `IEquipmentRepositoryDAC`
-* **IEquipmentRegistration**
+    * `IEnvTimeseriesRepository`
+    * `IControlHistoryRepository`
+    * `IDeviceStatusTimeseriesRepository`
+* 외부 클라이언트
 
-  * `registerDevice(cmd: RegisterDeviceCmd): void`
-  * `updateDevice(cmd: UpdateDeviceCmd): void`
-* **역할**
+  * `WarehouseSystemClient` : `IWarehouseSystemClient`
+  * `KEPCOClient` : `IKEPCOClient`
+  * `PushClient` : `IPushClient`
 
-  * 센서/공조장치 메타, 브로커 토픽 매핑 관리.
+**상→하 관계 (대표)**
 
-#### 4) InventoryIntegrationService
+* `EnvStatusQueryService` → `IEnvTimeseriesRepository`, `IWarehouseDeviceRepository`
+* `ZoneProfileService` → `IZoneProfileRepository`
+* `ControlPolicyService` → `IZoneProfileRepository`, `IEnvTimeseriesRepository`, `IControlHistoryRepository`, `IWarehouseDeviceRepository`, (필요시) `IKEPCOClient`
+* `InventoryEventService` → `IInventoryRepository`, `IWarehouseSystemClient`
+* `AlarmRuleService` → `IAlarmRuleRepository`, `IPushClient`
+* `DeviceConfigService` → `IWarehouseDeviceRepository`
 
-* **Provides**
-
-  * `IInventoryIntegration`
-* **Uses**
-
-  * `IWarehouseSystemGateway`
-* **IInventoryIntegration**
-
-  * `handleInbound(event: InboundEvent): void`
-  * `handleOutbound(event: OutboundEvent): void`
-* **역할**
-
-  * 입출고 이벤트를 정책/존/재고 정보와 연결.
-
-#### 5) ReportingService
-
-* **Provides**
-
-  * `IReportQuery`
-* **Uses**
-
-  * `IReportViewDAC`
-* **IReportQuery**
-
-  * `getEnvHistory(query: EnvHistoryQuery): EnvHistoryPage`
-  * `getControlHistory(query: ControlHistoryQuery): ControlHistoryPage`
-  * `getKpiSummary(query: KpiQuery): KpiSummary`
-* **역할**
-
-  * 리포트용 조회 서비스.
+**콜백 필요 없음** (하위가 상위를 직접 부르는 흐름 없음)
 
 ---
 
-### L3. DataAccess / Gateway
+## 2. HVAC 서버 (Kafka + Callback 적용 핵심)
 
-각 DAC는 “DB 접근만” 담당.
+**역할:** 센서/입출고 이벤트 기반 공조 제어, 제어 이력 기록.
+브로커(Kafka) + MasterDB + TSDB + 장비 벤더 API 사용.
 
-* **IPolicyRepositoryDAC**
+### Presentation Layer
 
-  * `findById(policyId): Policy`
-  * `save(policy: Policy): void`
-* **IZoneRepositoryDAC**
+* `HVACApiController`
 
-  * `findById(zoneId): ZoneProfile`
-  * `save(profile: ZoneProfile): void`
-* **IEquipmentRepositoryDAC**
+  * `IHVACControlAPI`
+  * `IHVACStatusAPI`
 
-  * `findById(deviceId): DeviceInfo`
-  * `save(device: DeviceInfo): void`
-* **IReportViewDAC**
+**상→하**
 
-  * 집계/뷰 테이블 조회.
-* **IWarehouseSystemGateway**
+* `HVACApiController` → `IHVACControlService`, `IHVACStatusQueryService`
 
-  * `sendEventToWms(event): Ack` 등, 실제 WMS 연동.
+### Application Layer
 
----
+#### 도메인/서비스 인터페이스
 
-## 2. 브로커 서버
+* `HVACControlService`
 
-### L1. Ingress / Client API
+  * 구현: `IHVACControlService`
+  * **이벤트 핸들러 역할도 겸함**
 
-#### 1) MqttIngressAdapter
+    * `IEnvSampleEventHandler`
+    * `IInOutEventHandler`
+* `SetpointCalculationService` : `ISetpointCalculationService`
+* `DeviceCommandService` : `IDeviceCommandService`
+* `HVACStatusQueryService` : `IHVACStatusQueryService`
 
-* **Provides**
+**상→하 관계**
 
-  * `IMqttIngress`
-* **Uses**
+* `HVACApiController` → `IHVACControlService`, `IHVACStatusQueryService`
+* `HVACControlService` → `ISetpointCalculationService`, `IDeviceCommandService`
+* `HVACControlService` → (아래 인터페이스들로 **등록/조회**)
 
-  * `IEnqueueMessage`
-* **IMqttIngress**
+  * `IEnvSampleSubscription`
+  * `IInOutEventSubscription`
+  * `IHVACDeviceConfigRepository`
+  * `IPolicyReferenceRepository`
+* `DeviceCommandService` → `IDeviceCommandPublishing`, `ISamsungHVACClient`, `ILGHVACClient`, `IControlHistoryRepository_HVAC`
+* `HVACStatusQueryService` → `IControlHistoryRepository_HVAC`, `IHVACDeviceConfigRepository`
 
-  * `onMqttMessage(topic: String, payload: Binary): Ack`
-* **역할**
+#### Callback 인터페이스 (Application 레이어 정의)
 
-  * 외부 MQTT 메시지를 내부 BrokerMessage로 변환 후 Core로 전달.
+* `IEnvSampleEventHandler`
 
-#### 2) HttpIngressAdapter
+  * `onEnvSample(zoneId, sample)`
+* `IInOutEventHandler`
 
-* **Provides**
+  * `onItemEvent(event)`
 
-  * `IHttpIngress`
-* **Uses**
+`HVACControlService` 가 둘 다 구현.
 
-  * `IEnqueueMessage`
-* **IHttpIngress**
+### Infrastructure Layer
 
-  * `postMessage(topic: String, body: JsonMessage): Ack`
-* **역할**
+* `BrokerGatewayForHVAC`
 
-  * Webhook/HTTP 기반 메시지 수신.
+  * 제공 인터페이스(상위에서 사용):
 
-#### 3) InternalPublishAPI
+    * `IEnvSampleSubscription`
 
-* **Provides**
+      * `registerEnvSampleHandler(handler: IEnvSampleEventHandler)`
+    * `IInOutEventSubscription`
 
-  * `IInternalPublish`
-* **Uses**
+      * `registerInOutEventHandler(handler: IInOutEventHandler)`
+    * `IDeviceCommandPublishing`
 
-  * `IEnqueueMessage`
-* **IInternalPublish**
+      * `publishDeviceCommand(cmd)`
+  * 내부에서 Kafka Consumer/Producer 처리.
+  * **실행 시**: 이벤트 수신 시 등록된 `IEnvSampleEventHandler` / `IInOutEventHandler`를 호출 (Sequence에서 `<<callback>>`로 표기).
 
-  * `publish(msg: BrokerMessage): Ack`
-* **역할**
+* Master DB
 
-  * 내부 서버(HVAC/Monitoring)가 브로커로 보내는 인터페이스.
+  * `HVACMasterDBAccess`
 
-#### 4) SubscriptionAccessAPI
+    * `IHVACDeviceConfigRepository`
+    * `IPolicyReferenceRepository`
 
-* **Provides**
+* TS DB
 
-  * `ISubscriptionAccess`
-* **Uses**
+  * `HVACTimeseriesDBAccess`
 
-  * `ISubscriptionQuery`, `IDeliveryService`
-* **ISubscriptionAccess**
+    * `IEnvTimeseriesRepository_HVAC`
+    * `IControlHistoryRepository_HVAC`
 
-  * `register(subReq: SubscribeRequest): Ack`
-  * `unregister(subscriberId: SubscriberId): Ack`
-  * `pull(subscriberId: SubscriberId, maxCount: int): BrokerMessageBatch`
-* **역할**
+* Vendor Clients
 
-  * 내부 Consumer가 구독/메시지 pull 할 진입점.
+  * `SamsungHVACClient` : `ISamsungHVACClient`
+  * `LGHVACClient` : `ILGHVACClient`
 
----
+**상→하 정적 관계**
 
-### L2. Broker Core
+* `HVACControlService` → `IEnvSampleSubscription`, `IInOutEventSubscription`,
+  `IHVACDeviceConfigRepository`, `IPolicyReferenceRepository`
+* `SetpointCalculationService` → `IEnvTimeseriesRepository_HVAC`
+* `DeviceCommandService` → `IDeviceCommandPublishing`,
+  `ISamsungHVACClient`, `ILGHVACClient`,
+  `IControlHistoryRepository_HVAC`
+* `HVACStatusQueryService` → `IControlHistoryRepository_HVAC`,
+  `IHVACDeviceConfigRepository`
 
-#### 1) MessageRoutingService
+**콜백 요약**
 
-* **Provides**
-
-  * `IEnqueueMessage`
-* **Uses**
-
-  * `IBrokerMetaStoreDAC`
-* **IEnqueueMessage**
-
-  * `enqueue(msg: BrokerMessage): Ack`
-* **역할**
-
-  * 토픽/키 기준 큐 배치, 메타 저장, (내부적으로 QoS/Retry 포함).
-
-#### 2) SubscriptionManager
-
-* **Provides**
-
-  * `ISubscriptionQuery`
-* **Uses**
-
-  * `IBrokerMetaStoreDAC`
-* **ISubscriptionQuery**
-
-  * `getSubscriptions(subscriberId): SubscriptionInfo`
-* **역할**
-
-  * 구독 정보 관리.
-
-#### 3) DeliveryService
-
-* **Provides**
-
-  * `IDeliveryService`
-* **Uses**
-
-  * `IBrokerMetaStoreDAC`
-* **IDeliveryService**
-
-  * `pull(subscriberId, maxCount): BrokerMessageBatch`
-* **역할**
-
-  * Consumer용 메시지 전달.
+* 등록: 상위(`HVACControlService`) → 하위(`BrokerGatewayForHVAC`)
+  `registerEnvSampleHandler(this)`, `registerInOutEventHandler(this)`
+* 호출: 하위가 **등록된 인터페이스**를 호출
+  `BrokerGatewayForHVAC -> IEnvSampleEventHandler.onEnvSample()` (시퀀스에서 `<<callback>>`)
+* 정적 의존성 관점: Application ↔ (공통 인터페이스) ↔ Infra 이고, **하위→상위 직접 참조 없음.**
 
 ---
 
-### L3. MetaStore DAC
+## 3. 모니터링 서버 (Heartbeat + 1minTimer Callback)
 
-* **IBrokerMetaStoreDAC**
+**역할:** 삼성/LG 공조장치 heartbeat 주기 확인, 상태 TSDB 기록, 이상 알림.
+센서 X, 브로커 X. Timer + Vendor API + DB.
 
-  * `storeMessage(meta: MessageMeta): void`
-  * `loadMessages(subscriberId, maxCount): BrokerMessageBatch`
-  * `saveOffset(subscriberId, offset: Offset): void`
-  * `saveSubscription(info: SubscriptionInfo): void`
-  * `storeDeadLetter(msg: BrokerMessage, reason: String): void`
-* **역할**
+### Presentation Layer
 
-  * 브로커 메타데이터 전용 저장소.
+* `MonitoringApiController`
 
----
+  * `IMonitoringQueryAPI`
+  * `IAlarmQueryAPI`
 
-## 3. HVAC 서버 (Dispatcher + Parallel Workers)
+**상→하**
 
-### L1. API / Subscribers
+* `MonitoringApiController` → `IMonitoringQueryService`, `IAlarmManagementService`
 
-#### 1) HvacControlAPI
+### Application Layer
 
-* **Provides**
+#### 콜백/스케줄링
 
-  * `IHvacControlRequest`
-* **Uses**
+* `DeviceHealthCheckScheduler`
 
-  * `IHvacControlService`
-* **IHvacControlRequest**
+  * `I1MinTickListener` 구현
+  * 1분마다 호출되면 `DeviceHealthCheckService` 실행
+* `DeviceHealthCheckService` : `IDeviceHealthCheckService`
+* `AlarmManagementService` : `IAlarmManagementService`
+* `MonitoringQueryService` : `IMonitoringQueryService`
 
-  * `applyManualControl(req: ZoneControlRequest): Ack`
-  * `applyPolicyOverride(req: PolicyOverrideRequest): Ack`
-* **역할**
+**상→하 관계**
 
-  * 운영자/상위 시스템의 수동 제어 요청 진입점.
+* `MonitoringApiController` → `IMonitoringQueryService`, `IAlarmManagementService`
+* `DeviceHealthCheckScheduler` → `IDeviceHealthCheckService`
+* `DeviceHealthCheckService` →
 
-#### 2) SensorEventSubscriber
+  * `IMonDeviceConfigRepository`
+  * `ISamsungHVACStatusClient`
+  * `ILGHVACStatusClient`
+  * `IDeviceHeartbeatRepository`
+* `AlarmManagementService` → `IPushClient`, `IDeviceStatusHistoryRepository`
+* `MonitoringQueryService` → `IDeviceHeartbeatRepository`, `IDeviceStatusHistoryRepository`
 
-* **Provides**
+#### Timer Callback 인터페이스
 
-  * `ISensorEventReceiver`
-* **Uses**
+* `I1MinTickListener` (Application에 정의)
 
-  * `IHvacControlService`
-* **ISensorEventReceiver**
+  * `on1MinTick()`
 
-  * `onEnvSample(sample: EnvSample): void`
-* **역할**
+`DeviceHealthCheckScheduler` 가 구현.
 
-  * 브로커에서 들어온 센서 값 이벤트 수신.
+### Infrastructure Layer
 
-#### 3) CommandMessageSubscriber
+* `TimerGateway`
 
-* **Provides**
+  * `I1MinTimerRegistration`
 
-  * `ICommandMessageReceiver`
-* **Uses**
+    * `register1MinTickListener(listener: I1MinTickListener)`
+  * 실제 OS/스케줄러 기반 1분 타이머.
+  * 1분마다 `listener.on1MinTick()` 호출 (`<<callback>>`)
 
-  * `IHvacControlService`
-* **ICommandMessageReceiver**
+* Master DB
 
-  * `onControlCommand(cmd: ControlCommand): void`
-* **역할**
+  * `MonMasterDBAccess` : `IMonDeviceConfigRepository`
 
-  * 브로커 기반 ControlCommand 수신.
+* TS DB
 
----
+  * `MonTimeseriesDBAccess` :
 
-### L2. Business
+    * `IDeviceHeartbeatRepository`
+    * `IDeviceStatusHistoryRepository`
 
-#### 1) HvacControlServiceDispatcher
+* Vendor Status Clients
 
-* **Provides**
+  * `SamsungHVACStatusClient` : `ISamsungHVACStatusClient`
+  * `LGHVACStatusClient` : `ILGHVACStatusClient`
 
-  * `IHvacControlService`
-* **Uses**
+* `PushClient` : `IPushClient`
 
-  * `IZoneControlWorker` (여러 개)
-* **IHvacControlService**
+**상→하 정적 관계**
 
-  * `handleEnvSample(sample: EnvSample): void`
-  * `handleControlCommand(cmd: ControlCommand): void`
-  * `handleManualRequest(req: ZoneControlRequest): void`
-* **역할**
+* `DeviceHealthCheckScheduler` → `I1MinTimerRegistration` (등록)
+* `DeviceHealthCheckService` → `IMonDeviceConfigRepository`,
+  `ISamsungHVACStatusClient`, `ILGHVACStatusClient`,
+  `IDeviceHeartbeatRepository`
+* `AlarmManagementService` → `IPushClient`, `IDeviceStatusHistoryRepository`
+* `MonitoringQueryService` → `IDeviceHeartbeatRepository`,
+  `IDeviceStatusHistoryRepository`
 
-  * 단일 진입 포트.
-  * zoneId/warehouseId 기반으로 적절한 `ZoneControlWorker`에 라우팅.
+**콜백 요약**
 
-#### 2) ZoneControlWorker (20개 병렬)
-
-* **Provides**
-
-  * `IZoneControlWorker`
-* **Uses**
-
-  * `IPolicyQueryDAC`
-  * `IControlHistoryDAC`
-  * `IVendorControlGateway`
-  * (도움용) `PolicyEvaluator`
-* **IZoneControlWorker**
-
-  * `processEnvSample(sample: EnvSample): void`
-  * `processControlCommand(cmd: ControlCommand): void`
-  * `processManualRequest(req: ZoneControlRequest): void`
-* **역할**
-
-  * 담당 존/창고에 대한 제어 알고리즘 실행.
-  * 병렬 실행으로 성능·격리 확보.
-
-#### 3) PolicyEvaluator
-
-* (선택) `IPolicyEvaluation` 제공 가능:
-
-  * `evaluate(sample: EnvSample, policy: Policy): ZoneControlPlan`
-* **Uses**
-
-  * `IPolicyQueryDAC`
-* **역할**
-
-  * 정책 계산 로직 분리.
+* 상위(App) `DeviceHealthCheckScheduler` 가 `TimerGateway.register1MinTickListener(this)` 호출.
+* 하위(Infra) Timer가 1분마다 `I1MinTickListener.on1MinTick()` 호출 (`<<callback>>`).
+* 정적 의존성은 상→하만 존재.
 
 ---
 
-### L3. DAC / Vendor Gateway
+이렇게 정리하면:
 
-* **IPolicyQueryDAC**
+* 세 서버 모두 **레이어 규칙 + Callback 사용 가이드**에 정확히 들어맞고,
+* 각 인터페이스가 “누가 제공 / 누가 사용 / 어떤 방향”인지 명확해서,
+* 이후 UC 시퀀스 다이어그램 그릴 때 그대로 가져다 써도 구조적 모순이 생기지 않아.
 
-  * `getEffectivePolicy(zoneId): Policy`
-* **IControlHistoryDAC**
+다음 단계에서 원하면,
+각 서버별 대표 UC(예: “센서값 수신→HVAC 제어”, “1분 heartbeat 체크→알람 발송”, “Ops에서 정책 변경→HVAC 반영”)를 이 인터페이스 이름 그대로 넣어서 시퀀스 다이어그램으로 바로 풀어줄게.
 
-  * `append(record: ControlRecord): void`
-  * `query(query: ControlHistoryQuery): ControlHistoryPage`
-* **IVendorControlGateway**
+==========================================================================================
 
-  * `sendCommand(cmd: VendorCommand): VendorAck`
-* 구현체:
+좋다, 이제 이걸 “진짜 코드 짤 수 있을 만큼” 인터페이스/데이터타입 정의까지 내려보자.
+요구한 것처럼:
 
-  * `SamsungHvacGateway`, `LGHvacGateway`, etc.
-* **역할**
+* 공통 DataType/Enum 먼저 정의
+* 각 서버별로 **Provided / Required 인터페이스를 레이어 기준으로 분리**
+* 각 오퍼레이션의 파라미터/리턴 타입을 전부 명시
 
-  * 정책 조회, 제어 이력 저장, 실제 공조 장치 API 호출.
-
----
-
-## 4. 모니터링 서버
-
-### L1. Dashboard / Timer / Subscriber
-
-#### 1) MonitoringDashboardAPI
-
-* **Provides**
-
-  * `IMonitoringView`
-* **Uses**
-
-  * `IStatusQuery`
-  * `IAlarmQuery`
-* **IMonitoringView**
-
-  * `getCurrentStatus(q: StatusQuery): StatusSnapshot`
-  * `getAlarms(q: AlarmHistoryQuery): AlarmHistoryPage`
-* **역할**
-
-  * 운영자 모니터링 화면 진입점.
-
-#### 2) DeviceEventSubscriber
-
-* **Provides**
-
-  * `IDeviceEventReceiver`
-* **Uses**
-
-  * `IEventProcessing`
-* **IDeviceEventReceiver**
-
-  * `onDeviceEvent(event: DeviceStatusEvent): void`
-  * `onAlarmEvent(event: AlarmEvent): void`
-* **역할**
-
-  * 브로커 등에서 오는 장치/알람 이벤트 수신.
-
-#### 3) HvacStatusPollTimer
-
-* **Provides**
-
-  * `I1MinTimer`
-* **Uses**
-
-  * `IDeviceStatusPollingService`
-* **I1MinTimer**
-
-  * `onTick(): void`
-* **역할**
-
-  * 1분마다 PollingService를 호출하는 스케줄러.
+구체 언어는 안 박고, 타입 이름만 딱 보면 설계 리뷰에서 읽히도록 써둘게.
 
 ---
 
-### L2. Business
-
-#### 1) DeviceStatusPollingService
-
-* **Provides**
-
-  * `IDeviceStatusPollingService`
-* **Uses**
-
-  * `ISamsungStatusGateway`
-  * `ILgStatusGateway`
-  * `IMonitoringEventDAC`
-  * `IAlarmService`
-* **IDeviceStatusPollingService**
-
-  * `pollAllDevices(): void`
-* **역할**
-
-  * 1분 주기로 공조 장치 상태 heartbeat 조회 → 상태 저장 및 이상 시 알람 생성.
-
-#### 2) EventProcessingService
-
-* **Provides**
-
-  * `IEventProcessing`
-* **Uses**
-
-  * `IMonitoringEventDAC`
-  * `IAlarmService`
-* **IEventProcessing**
-
-  * `handleDeviceEvent(event: DeviceStatusEvent): void`
-  * `handleAlarmEvent(event: AlarmEvent): void`
-* **역할**
-
-  * 이벤트 기반 상태/알람 처리.
-
-#### 3) AlarmService
-
-* **Provides**
-
-  * `IAlarmService`
-  * `IAlarmQuery`
-* **Uses**
-
-  * `IAlarmHistoryDAC`
-  * `IPushGateway`
-* **IAlarmService**
-
-  * `raiseAlarm(event: AlarmEvent): void`
-  * `clearAlarm(alarmId: AlarmId): void`
-* **IAlarmQuery**
-
-  * `getAlarms(q: AlarmHistoryQuery): AlarmHistoryPage`
-* **역할**
-
-  * 알람 생성·종료·저장·푸시 발송.
-
-#### 4) HealthEvaluationService
-
-* **Provides**
-
-  * `IStatusQuery`
-* **Uses**
-
-  * `IMonitoringEventDAC`
-* **IStatusQuery**
-
-  * `getStatus(q: StatusQuery): StatusSnapshot`
-* **역할**
-
-  * 최신 상태 스냅샷 계산.
-
----
-
-### L3. DAC / Gateway
-
-* **IMonitoringEventDAC**
-
-  * `saveDeviceStatus(event: DeviceStatusEvent): void`
-  * `loadStatus(q: StatusQuery): StatusSnapshot`
-* **IAlarmHistoryDAC**
-
-  * `saveAlarm(alarm: AlarmEvent): void`
-  * `loadAlarms(q: AlarmHistoryQuery): AlarmHistoryPage`
-* **IPushGateway**
-
-  * `send(msg: PushMessage): Ack`
-* **ISamsungStatusGateway / ILgStatusGateway**
-
-  * `fetchStatuses(): List<DeviceStatusEvent>`
-* **역할**
-
-  * 모니터링/알람 데이터 저장 및 Push, 벤더 상태 조회.
-
----
-
-## 5. 공통 주요 타입 (요약)
-
-이거만 문서 초반에 정의해두면 위 인터페이스 전부 설명 가능.
-
-* `WarehouseId`, `ZoneId`, `DeviceId`, `PolicyId`, `AlarmId`, `SubscriberId`
-* `EnvSample { timestamp, warehouseId, zoneId, sensorId, temperature, humidity, ... }`
-* `DeviceStatusEvent { deviceId, type: DeviceType, state: DeviceState, lastHeartbeatAt, errorCode? }`
-* `ControlCommand { commandId, targetZoneId/DeviceId, type: CommandType, params, requestedBy, requestedAt }`
-* `ZoneControlRequest`, `PolicyOverrideRequest`, `ZoneControlPlan`
-* `ControlRecord { commandId, deviceId, result: ResultCode, executedAt, ... }`
-* `AlarmEvent { alarmId, severity, type, source, message, occurredAt, clearedAt? }`
-* `BrokerMessage { topic, headers, payload, messageType }`
-* `PushMessage { targets, title, body, severity }`
-* 페이지네이션/조회용: `EnvHistoryQuery`, `StatusQuery`, `AlarmHistoryQuery`, `KpiQuery` 등.
-
-**Enums**
-
-* `DeviceType = { ENV_SENSOR, ITEM_SENSOR, HVAC, FAN, AIR_CLEANER, ... }`
-* `DeviceState = { NORMAL, WARNING, ERROR, OFFLINE }`
-* `CommandType = { SET_TEMP, SET_MODE, SET_HUMIDITY, SET_FAN_SPEED, POWER_ON, POWER_OFF }`
-* `ResultCode = { SUCCESS, TEMP_FAIL, PERM_FAIL }`
-* `AlarmSeverity = { INFO, WARNING, CRITICAL }`
-* `AlarmSource = { SENSOR, HVAC_DEVICE, BROKER, MONITORING, OTHER }`
-
----
-
-이 구성이 지금 너가 그려둔 PlantUML, 인프라 뷰, UC/QA, Prefinal 피드백까지 전부 일관되게 설명해줄 수 있는 “정제된 스펙”이다.
-
-이제 문서에 넣을 땐:
-
-* 서버별로 ① 컴포넌트 목록, ② 인터페이스 표, ③ 여기 정의한 타입 목록만 옮기면 끝.
-  추가로 특정 UC에 매핑하는 표가 필요하면, 그 부분도 바로 이어서 짜줄 수 있어.
-\\===================================================================================\\===================================================================================\\===================================================================================\\===================================================================================
-
-
-바로 매핑까지 박제해보자.
-네가 지금까지 정리한 설계 기준으로 **“각 UC를 누가 책임지는지”**를 딱 보이게 정리해줄게.
-
-UC 이름/번호는 네 그림 기준으로 잡았고, 밑에 “정책/설정/조회/입출고” 같은 UC들도 같이 매핑했다.
-(실제 번호 다를 때는 표에서 ID만 바꿔 쓰면 된다.)
-
----
-
-## 1. UC별 책임 모듈 매핑 표
-
-### UC01. 환경 모니터링 (창고 환경 값 수집)
-
-| 항목         | 내용                                                                                                                                                                                                                                                                                                                                                                   |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| UC 설명      | AirGradient/통합센서가 전송한 온습도 등 환경값을 수집·저장하고, 운영자가 조회할 수 있게 함                                                                                                                                                                                                                                                                                                            |
-| Primary    | **브로커 서버**: `MqttIngressAdapter`, `HttpIngressAdapter`, `MessageRoutingService`, `DeliveryService` (센서 메시지 라우팅)<br>**HVAC 서버**: `SensorEventSubscriber` → `HvacControlServiceDispatcher` → `ZoneControlWorker.processEnvSample` (제어 입력으로 활용)<br>**모니터링 서버**(선택): `DeviceEventSubscriber` → `EventProcessingService` → `MonitoringEventDAC` (환경 모니터링 화면/알람용 시계열 저장 시) |
-| Supporting | **와인셀러 공조 시스템 서버**: `ReportingService` + `IReportViewDAC` (환경 이력/리포트 조회)                                                                                                                                                                                                                                                                                             |
-| 핵심 포인트     | 센서값은 브로커가 받고, HVAC/모니터링이 소비. 공조 시스템 서버는 조회/분석만 담당.                                                                                                                                                                                                                                                                                                                   |
-
----
-
-### UC02. 공조 수행 (자동/수동 HVAC 제어)
-
-| 항목         | 내용                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| UC 설명      | 정책/센서 값을 기반으로 각 존 공조 장치를 제어 (자동) + 운영자 수동 제어                                                                                                                                                                                                                                                                                                                                                                                               |
-| Primary    | **HVAC 서버**: <br>- L1: `HvacControlAPI(IHvacControlRequest)`, `SensorEventSubscriber(ISensorEventReceiver)`, `CommandMessageSubscriber(ICommandMessageReceiver)`<br>- L2: `HvacControlServiceDispatcher(IHvacControlService)` → `ZoneControlWorker(IZoneControlWorker)` + `PolicyEvaluator`<br>- L3: `PolicyQueryDAC(IPolicyQueryDAC)`, `ControlHistoryDAC(IControlHistoryDAC)`, `SamsungHvacGateway/LGHvacGateway(IVendorControlGateway)` |
-| Supporting | **브로커 서버**: 센서/명령 전달 허브<br>**와인셀러 공조 시스템 서버**: `PolicyManagementService`, `ZoneProfileService` (정책/존 정보 제공)<br>**모니터링 서버**: `EventProcessingService`, `AlarmService` (제어 실패/장애 알림)                                                                                                                                                                                                                                                         |
-| 핵심 포인트     | 제어 의사결정과 벤더 API 호출은 HVAC 서버 전담. 공조 시스템 서버는 정책 소스, 브로커는 파이프.                                                                                                                                                                                                                                                                                                                                                                                |
-
----
-
-### UC03. 삼성 공조 장치 모니터링
-
-| 항목         | 내용                                                                                                                                                                                                                                                                                                                   |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| UC 설명      | 삼성 공조기 상태를 주기적으로 점검하고 이상 시 알람                                                                                                                                                                                                                                                                                        |
-| Primary    | **모니터링 서버**: <br>- L1: `HvacStatusPollTimer(I1MinTimer)`<br>- L2: `DeviceStatusPollingService(IDeviceStatusPollingService)` → `AlarmService(IAlarmService)` → `HealthEvaluationService(IStatusQuery)`<br>- L3: `SamsungStatusGateway(ISamsungStatusGateway)`, `MonitoringEventDAC`, `AlarmHistoryDAC`, `PushGateway` |
-| Supporting | **HVAC 서버**: 실제 제어 실행, 상태/오류 코드를 벤더에 반영<br>**브로커 서버**: 필요 시 상태 이벤트도 메시지로 전달 가능 (옵션)                                                                                                                                                                                                                                  |
-| 핵심 포인트     | “1분 Polling + 상태 저장 + 알람”은 모니터링 서버 책임.                                                                                                                                                                                                                                                                               |
-
----
-
-### UC04. LG 공조 장치 모니터링
-
-LG 버전도 삼성과 동일 구조.
-
-| 항목         | 내용                                                                                                                                                          |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| UC 설명      | LG 공조기 상태 Polling 및 알람                                                                                                                                      |
-| Primary    | **모니터링 서버**: `HvacStatusPollTimer` → `DeviceStatusPollingService` → `MonitoringEventDAC`/`AlarmService`/`PushGateway` + `LgStatusGateway(ILgStatusGateway)` |
-| Supporting | **HVAC 서버**, **브로커 서버** (위와 동일 역할)                                                                                                                          |
-| 핵심 포인트     | 벤더만 다르고 UC03과 동일 패턴.                                                                                                                                        |
-
----
-
-### UC05. 공조 정책 설정
-
-| 항목         | 내용                                                                                                                                                                      |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| UC 설명      | 창고/존별 목표 온습도/운전전략 등 정책 정의·변경                                                                                                                                            |
-| Primary    | **와인셀러 공조 시스템 서버**:<br>- L1: `AdminConfigFacade(IAdminConfigService)`<br>- L2: `PolicyManagementService(IPolicyManagement/IPolicyQuery)`<br>- L3: `PolicyRepositoryDAC` |
-| Supporting | **HVAC 서버**: `PolicyQueryDAC`를 통해 정책 참조<br>**모니터링 서버**: 정책 기준으로 알람 조건 설정(설명 수준)                                                                                         |
-| 핵심 포인트     | 정책 변경은 여기 단일 진입; 다른 서버는 읽기만.                                                                                                                                            |
-
----
-
-### UC06. 장치/센서 설정
-
-| 항목         | 내용                                                                                                                                                                                            |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| UC 설명      | 센서, 공조장치, 토픽/엔드포인트, 설치 위치 등록/수정                                                                                                                                                               |
-| Primary    | **와인셀러 공조 시스템 서버**:<br>- L1: `AdminConfigFacade`<br>- L2: `EquipmentRegistrationService(IEquipmentRegistration)`, `ZoneProfileService`<br>- L3: `EquipmentRepositoryDAC`, `ZoneRepositoryDAC` |
-| Supporting | **브로커 서버**: 등록 결과를 바탕으로 토픽/Client 설정 (설계/운영 프로세스)<br>**HVAC/모니터링 서버**: 새 장치 메타로 제어/모니터링 대상 업데이트                                                                                               |
-| 핵심 포인트     | 장치 메타는 공조 시스템 서버 책임, 나머지는 그 정보를 소비.                                                                                                                                                           |
-
----
-
-### UC07. 상태 확인 (운영자 실시간 상태 조회)
-
-| 항목         | 내용                                                                                                                                                                                             |
-| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| UC 설명      | 운영자가 현재 창고 환경, 공조 상태, 장치 상태를 조회                                                                                                                                                                |
-| Primary    | **모니터링 서버**:<br>- L1: `MonitoringDashboardAPI(IMonitoringView)`<br>- L2: `HealthEvaluationService(IStatusQuery)`, `AlarmService(IAlarmQuery)`<br>- L3: `MonitoringEventDAC`, `AlarmHistoryDAC` |
-| Supporting | **와인셀러 공조 시스템 서버**: 정책/존 정보 제공(뷰에 함께 표시)<br>**HVAC 서버**: 제어 이력/현재 모드 정보(연계 조회용)                                                                                                                |
-| 핵심 포인트     | “현재 상태 화면”은 모니터링 서버 중심.                                                                                                                                                                        |
-
----
-
-### UC08. 관리 이력 조회 (환경/제어/알람 히스토리)
-
-| 항목         | 내용                                                                                                                                                                        |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| UC 설명      | 과거 환경 데이터, 제어 이력, 알람 이력 조회                                                                                                                                                |
-| Primary    | **와인셀러 공조 시스템 서버**: `ReportingService(IReportQuery)` + `ReportViewDAC` (환경/제어 KPI 리포트 중심)<br>**모니터링 서버**: `AlarmService(IAlarmQuery)`, `MonitoringEventDAC` (상세 알람/상태 이력) |
-| Supporting | **HVAC 서버**: `ControlHistoryDAC` (제어 이력 소스)<br>**브로커 서버**: 필요 시 DLQ/메타 분석(운영 관점)                                                                                          |
-| 핵심 포인트     | 리포트/분석 뷰는 공조 시스템 서버, 알람 히스토리는 모니터링 서버.                                                                                                                                    |
-
----
-
-### UC09. 입입고(반입/반출) 연계
-
-| 항목         | 내용                                                                                                                                                                               |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| UC 설명      | 반입/반출 이벤트를 창고 시스템에서 받아 품종/위치/정책에 반영                                                                                                                                              |
-| Primary    | **와인셀러 공조 시스템 서버**:<br>- L1: `WarehouseIntegrationAPI(IWarehouseIntegrationAPI)`<br>- L2: `InventoryIntegrationService(IInventoryIntegration)`<br>- L3: `WarehouseSystemGateway` |
-| Supporting | **HVAC 서버**: 특정 품종/재고 변화에 따른 정책/제어에 간접 영향(PolicyEvaluator 경유)                                                                                                                    |
-| 핵심 포인트     | WMS 연계는 전적으로 공조 시스템 서버의 업무 책임.                                                                                                                                                   |
-
----
-
-## 2. 요약 뉘앙스 (문서에 써먹기용)
-
-문서에 한 줄로 넣을 때는 이렇게 적으면 된다:
-
-* **UC01(환경 모니터링)**: 센서 데이터는 브로커 서버에서 수집·중계하고, HVAC/모니터링 서버가 소비하며, 와인셀러 공조 시스템 서버는 이력 조회·리포트를 담당한다.
-* **UC02(공조 수행)**: HVAC 서버의 `HvacControlServiceDispatcher + ZoneControlWorker`가 단일 진입 포트와 병렬 워커 구조로 모든 자동/수동 공조 제어를 담당한다.
-* **UC03/UC04(벤더별 공조 장치 모니터링)**: 모니터링 서버가 1분 주기 Polling 및 알람 발송을 전담하며, HVAC 서버는 실제 제어 수행, 브로커는 필요 시 이벤트 전달을 담당한다.
-* **정책/설정 관련 UC**: 와인셀러 공조 시스템 서버가 단일 책임; 다른 서버는 읽기 전용.
-* **상태/알람/이력 조회 UC**: 실시간/알람은 모니터링 서버, 장기 리포트/경영지표는 공조 시스템 서버.
-
-이 정도면 심사자 입장에서 “각 UC가 어느 서버/컴포넌트에 매핑되는지” 한 번에 보이고,
-Layer 규칙·역할분리·브로커/HVAC/모니터링의 책임도 깔끔하게 설명된다.
-
-\\===================================================================================\\===================================================================================\\===================================================================================\\===================================================================================
-
-
-좋아, 이제 진짜 “끝판왕” 단계야.
-UC01~UC04까지 각 플로우를:
-
-* 노드별 스윔레인(`box`로 서버 구분)
-* 우리가 정의한 컴포넌트/인터페이스/오퍼레이션 이름만 사용
-* 기능 + 비기능(메시지 기반, 분산, 확장성, 가용성 등) 충족 흐름이 보이도록
-
-**PlantUML 시퀀스 다이어그램**으로 정리해줄게.
-
-바로 코드 넣을 테니, 복붙해서 렌더링하면 된다.
-
----
-
-## UC01 – 환경 모니터링
-
-센서 데이터 수집 → 브로커 → HVAC 제어에 활용 → 모니터링/리포트 조회 흐름.
-
-```plantuml
-@startuml
-title UC01 환경 모니터링 - Node별 Swimlane Sequence
-
-actor EnvSensor as S
-actor Operator as Op
-
-box "Broker Server"
-  participant MqttIngressAdapter as Mqtt
-  participant MessageRoutingService as Route
-  participant DeliveryService as Deliver
-end box
-
-box "HVAC Server"
-  participant SensorEventSubscriber as HvacSub
-  participant HvacControlServiceDispatcher as HvacDisp
-  participant ZoneControlWorker as ZCW
-  participant PolicyQueryDAC as PolicyDAC
-  participant ControlHistoryDAC as CHistDAC
-  participant SamsungHvacGateway as Sgw
-  participant LGHvacGateway as Lgw
-end box
-
-box "Monitoring Server"
-  participant DeviceEventSubscriber as MonSub
-  participant EventProcessingService as EPS
-  participant MonitoringEventDAC as MEDAC
-  participant AlarmService as AlarmSvc
-end box
-
-box "Winecellar Control System Server"
-  participant ReportingService as ReportSvc
-  participant ReportViewDAC as ReportDAC
-end box
-
-== 센서 데이터 수집 & 브로커 라우팅 ==
-
-S -> Mqtt : onMqttMessage(topic, payload)
-Mqtt -> Route : enqueue(BrokerMessage)
-Route --> Deliver : (store & route)
-
-== 내부 Consumer로 전달 (메시지 기반) ==
-
-Deliver --> HvacSub : onEnvSample(sample)
-Deliver --> MonSub : onDeviceEvent(sample)  # 환경 모니터링용(옵션)
-
-== HVAC 서버: 제어 로직 수행 ==
-
-HvacSub -> HvacDisp : handleEnvSample(sample)
-HvacDisp -> ZCW : processEnvSample(sample)
-
-ZCW -> PolicyDAC : getEffectivePolicy(zoneId)
-PolicyDAC --> ZCW : Policy
-
-ZCW -> Sgw : sendCommand(VendorCommand)  # 벤더에 따라 Sgw/Lgw 중 하나
-ZCW -> CHistDAC : append(ControlRecord)
-
-== 모니터링 서버: 상태 저장 및 알람 ==
-
-MonSub -> EPS : handleDeviceEvent(sample)
-EPS -> MEDAC : saveDeviceStatus(sample)
-
-EPS -> AlarmSvc : raiseAlarm(AlarmEvent)  # 임계치 초과 시
-AlarmSvc -> MEDAC : saveAlarm(alarm)
-
-== 운영자 조회 (리포트) ==
-
-Op -> ReportSvc : getEnvHistory(EnvHistoryQuery)
-ReportSvc -> ReportDAC : loadEnvHistory(...)
-ReportDAC --> ReportSvc : EnvHistoryPage
-ReportSvc --> Op : EnvHistoryPage
-
-@enduml
+## 0. 공통 DataType / Enum 정의
+
+### ID 계열
+
+```text
+type SensorId        = string
+type WarehouseId     = string
+type ZoneId          = string       // 창고 내 존/셀러 단위
+type DeviceId        = string       // 공조 장치, 센서 장치 등
+type ManufacturerId  = string       // "SAMSUNG", "LG", ...
+type AlarmId         = string
+type CommandId       = string
 ```
 
-**요구사항 매핑**
+### 환경 측정 관련
 
-* 메시지 기반, 느슨한 결합: 센서 ↔ 브로커 ↔ HVAC/모니터링.
-* 실시간 제어 성능: HVAC가 직접 브로커에서 수신, 공조 시스템 서버 미개입.
-* 확장성: 브로커/ZoneControlWorker 병렬 구조로 센서 수 증대 대응.
-* 모니터링/리포트 분리: 운영 조회는 ReportSvc가 별도 담당.
+```text
+type Timestamp       = datetime
 
----
+enum EnvMetricType { TEMP, HUMID, CO2, PM25, VOC }
 
-## UC02 – 공조 수행 (자동/수동 제어)
+struct EnvSample {
+  sensorId: SensorId
+  warehouseId?: WarehouseId  // 매핑 후 사용할 수 있음
+  zoneId?: ZoneId
+  measuredAt: Timestamp
+  temperature?: float
+  humidity?: float
+  co2?: float
+  pm25?: float
+  voc?: float
+}
 
-수동 제어 요청 + 자동 제어(센서 기반)를 HVAC 서버가 처리하는 흐름.
-
-```plantuml
-@startuml
-title UC02 공조 수행 - Node별 Swimlane Sequence
-
-actor Operator as Op
-actor EnvSensor as S
-
-box "Winecellar Control System Server"
-  participant AdminConfigFacade as AdminUI
-  participant PolicyManagementService as PolicySvc
-  participant PolicyRepositoryDAC as PolicyRepo
-end box
-
-box "Broker Server"
-  participant MqttIngressAdapter as Mqtt
-  participant MessageRoutingService as Route
-  participant DeliveryService as Deliver
-end box
-
-box "HVAC Server"
-  participant HvacControlAPI as HvacAPI
-  participant SensorEventSubscriber as HvacSub
-  participant CommandMessageSubscriber as CmdSub
-  participant HvacControlServiceDispatcher as HvacDisp
-  participant ZoneControlWorker as ZCW
-  participant PolicyQueryDAC as PolicyDAC
-  participant ControlHistoryDAC as CHistDAC
-  participant SamsungHvacGateway as Sgw
-  participant LGHvacGateway as Lgw
-end box
-
-box "Monitoring Server"
-  participant AlarmService as AlarmSvc
-end box
-
-== 정책 설정 (사전 조건) ==
-
-Op -> AdminUI : savePolicy(SavePolicyCmd)
-AdminUI -> PolicySvc : savePolicy(cmd)
-PolicySvc -> PolicyRepo : save(policy)
-
-== 센서 기반 자동 제어 ==
-
-S -> Mqtt : onMqttMessage(topic, payload)
-Mqtt -> Route : enqueue(BrokerMessage)
-Route --> Deliver
-
-Deliver --> HvacSub : onEnvSample(sample)
-HvacSub -> HvacDisp : handleEnvSample(sample)
-HvacDisp -> ZCW : processEnvSample(sample)
-
-ZCW -> PolicyDAC : getEffectivePolicy(zoneId)
-PolicyDAC --> ZCW : Policy
-ZCW -> Sgw : sendCommand(VendorCommand)  # 또는 Lgw
-ZCW -> CHistDAC : append(ControlRecord)
-
-== 수동 제어 요청 ==
-
-Op -> HvacAPI : applyManualControl(ZoneControlRequest)
-HvacAPI -> HvacDisp : handleManualRequest(req)
-HvacDisp -> ZCW : processManualRequest(req)
-
-ZCW -> Sgw : sendCommand(VendorCommand)
-ZCW -> CHistDAC : append(ControlRecord)
-
-== 제어 실패 시 알람 ==
-
-ZCW --> AlarmSvc : raiseAlarm(AlarmEvent)  # 실패/시간초과 시 (메시지 또는 API)
-
-@enduml
+struct EnvSampleWithLocation {
+  warehouseId: WarehouseId
+  zoneId: ZoneId
+  measuredAt: Timestamp
+  temperature?: float
+  humidity?: float
+  co2?: float
+  pm25?: float
+  voc?: float
+}
 ```
 
-**요구사항 매핑**
+### 정책/프로파일/제어
 
-* 정책 변경은 공조 시스템 서버에서만; HVAC는 조회만.
-* 자동/수동 제어 모두 `IHvacControlService`를 통해 ZoneControlWorker로 수렴 → 일관된 로직.
-* 제어 실패 시 모니터링 서버의 AlarmService로 전달 → 가용성/장애 감지 QA 충족.
+```text
+struct ZoneProfile {
+  warehouseId: WarehouseId
+  zoneId: ZoneId
+  targetTempRange: (float min, float max)
+  targetHumidityRange: (float min, float max)
+  targetCo2Max?: float
+  targetPm25Max?: float
+}
 
----
+struct ControlPolicyRange {
+  warehouseId: WarehouseId
+  zoneId: ZoneId
+  tempMin: float
+  tempMax: float
+  humidityMin: float
+  humidityMax: float
+  co2Max?: float
+  pm25Max?: float
+}
 
-## UC03 – 삼성 공조 장치 모니터링 (1분 Polling)
+enum DeviceType { HVAC, AIR_PURIFIER, VENTILATION, HUMIDIFIER, DEHUMIDIFIER }
 
-Timer 기반 heartbeat → 모니터링 서버 → 알람.
+enum ManufacturerType { SAMSUNG, LG }
 
-```plantuml
-@startuml
-title UC03 삼성 공조 장치 모니터링 - Node별 Swimlane Sequence
+struct WarehouseDevice {
+  deviceId: DeviceId
+  warehouseId: WarehouseId
+  zoneId: ZoneId
+  manufacturer: ManufacturerType
+  deviceType: DeviceType
+  address: string           // API endpoint or logical address
+}
 
-actor Timer as T
-
-box "Monitoring Server"
-  participant HvacStatusPollTimer as PollTimer
-  participant DeviceStatusPollingService as PollSvc
-  participant SamsungStatusGateway as Sgw
-  participant MonitoringEventDAC as MEDAC
-  participant AlarmService as AlarmSvc
-end box
-
-box "HVAC Server"
-  participant ZoneControlWorker as ZCW  # 참고용 (이미 운전 중)
-end box
-
-== 1분 주기 Polling ==
-
-T -> PollTimer : onTick()
-PollTimer -> PollSvc : pollAllDevices()
-
-PollSvc -> Sgw : fetchStatuses()
-Sgw --> PollSvc : List<DeviceStatusEvent>
-
-== 상태 저장 ==
-
-PollSvc -> MEDAC : saveDeviceStatus(events)
-
-== 이상 감지 및 알람 ==
-
-PollSvc -> AlarmSvc : raiseAlarm(AlarmEvent)  # 상태 불량인 장치에 대해
-AlarmSvc -> MEDAC : saveAlarm(alarm)
-
-@enduml
+struct TargetControlCommand {
+  commandId: CommandId
+  warehouseId: WarehouseId
+  zoneId: ZoneId
+  deviceId: DeviceId
+  mode: string              // 예: "COOL", "HEAT", ...
+  setTemp?: float
+  setHumidity?: float
+  fanSpeed?: int
+  etcOptions: map<string, string>
+}
 ```
 
-**요구사항 매핑**
+### 장치 상태/모니터링
 
-* 1분 heartbeat 타이머로 삼성 공조기 상태 확인 → 장애 조기 감지(QA-02).
-* 모니터링 서버가 Polling/알람 전담 → HVAC 제어와 분리, 책임 명확.
-* Vendor GW로만 외부 호출 → Layer 규칙 유지.
+```text
+enum HealthState { NORMAL, WARN, DOWN, UNKNOWN }
 
----
+struct DeviceStatus {
+  deviceId: DeviceId
+  warehouseId: WarehouseId
+  checkedAt: Timestamp
+  health: HealthState
+  detailMessage?: string
+}
 
-## UC04 – LG 공조 장치 모니터링 (1분 Polling)
-
-UC03과 동일 패턴, LG용 컴포넌트.
-
-```plantuml
-@startuml
-title UC04 LG 공조 장치 모니터링 - Node별 Swimlane Sequence
-
-actor Timer as T
-
-box "Monitoring Server"
-  participant HvacStatusPollTimer as PollTimer
-  participant DeviceStatusPollingService as PollSvc
-  participant LgStatusGateway as Lgw
-  participant MonitoringEventDAC as MEDAC
-  participant AlarmService as AlarmSvc
-end box
-
-box "HVAC Server"
-  participant ZoneControlWorker as ZCW
-end box
-
-== 1분 주기 Polling ==
-
-T -> PollTimer : onTick()
-PollTimer -> PollSvc : pollAllDevices()
-
-PollSvc -> Lgw : fetchStatuses()
-Lgw --> PollSvc : List<DeviceStatusEvent>
-
-== 상태 저장 ==
-
-PollSvc -> MEDAC : saveDeviceStatus(events)
-
-== 이상 감지 및 알람 ==
-
-PollSvc -> AlarmSvc : raiseAlarm(AlarmEvent)
-AlarmSvc -> MEDAC : saveAlarm(alarm)
-
-@enduml
+struct HeartbeatRecord {
+  deviceId: DeviceId
+  warehouseId: WarehouseId
+  checkedAt: Timestamp
+  success: bool
+  responseTimeMs?: int
+}
 ```
 
-**요구사항 매핑**
+### 알람 / 결과 공통
 
-* LG 공조기까지 동일한 모니터링 패턴 적용 → 벤더 확장 용이성(QA-04).
-* Polling/알람 로직 재사용, Gateway만 교체 → 구조적 일관성.
+```text
+enum AlarmSeverity { INFO, WARN, ERROR, CRITICAL }
+
+enum AlarmType {
+  UNKNOWN_SENSOR,
+  ENV_STORE_FAILURE,
+  HVAC_CONTROL_ERROR,
+  DEVICE_DOWN,
+  PUSH_SERVER_ERROR
+}
+
+struct AlarmEvent {
+  alarmId: AlarmId
+  type: AlarmType
+  severity: AlarmSeverity
+  occurredAt: Timestamp
+  warehouseId?: WarehouseId
+  deviceId?: DeviceId
+  message: string
+}
+
+enum PushStatus { SUCCESS, TEMP_FAILURE, PERM_FAILURE }
+
+struct OperationResult {
+  success: bool
+  errorCode?: string
+  message?: string
+}
+```
+
+이걸 기반으로 서버별 인터페이스를 깔끔히 나눈다.
 
 ---
 
-## 이렇게 보면
+## 1. Wine Cellar Ops Server
 
-* 각 UC가 **어느 노드/컴포넌트/인터페이스를 타고 흐르는지**가 선명하게 보이고,
-* 메시지 기반 구조, 3-Layer 규칙, 병렬 ZoneControlWorker, 1분 Polling 같은
-  **비기능 요구사항(성능, 확장성, 장애 감지, 변경 용이성)** 도 같이 드러난다.
+Ops는 **Master/TS DB 기반 비즈니스/조회 서버**. 브로커/센서 직접 X.
 
-다음 단계에서 원하면:
+### 1-1. Presentation Layer – Provided APIs
 
-* 각 시퀀스 다이어그램 아래에 “요구사항 체크리스트” 표(기능/비기능별)도 붙여서
-  평가자용 설명 페이지까지 한 번에 만들어줄 수 있어.
+(외부/운영자/다른 서버에서 호출)
 
+**IEnvMonitoringAPI (Provided by EnvMonitoringController)**
+
+```text
+EnvStatusView getCurrentEnvStatus(warehouseId: WarehouseId, zoneId?: ZoneId)
+
+EnvHistoryView getEnvHistory(
+  warehouseId: WarehouseId,
+  zoneId: ZoneId,
+  from: Timestamp,
+  to: Timestamp
+)
+```
+
+**IControlPolicyAPI (Provided by ControlPolicyController)**
+
+```text
+OperationResult defineZoneProfile(profile: ZoneProfile)
+
+ZoneProfile getZoneProfile(warehouseId: WarehouseId, zoneId: ZoneId)
+```
+
+**IInventoryAPI (Provided by InventoryController)**
+
+```text
+OperationResult registerInOutEvent(event: InOutEvent)
+
+InOutHistoryView getInOutHistory(warehouseId: WarehouseId, period: TimeRange)
+```
+
+**IAlarmPolicyAPI (Provided by AlarmPolicyController)**
+
+```text
+OperationResult defineAlarmRule(rule: AlarmRule)
+
+AlarmRule getAlarmRule(ruleId: string)
+```
+
+**IDeviceConfigAPI (Provided by DeviceConfigController)**
+
+```text
+OperationResult registerWarehouseDevice(device: WarehouseDevice)
+
+WarehouseDevice getWarehouseDevice(deviceId: DeviceId)
+List<WarehouseDevice> listWarehouseDevices(warehouseId: WarehouseId)
+```
+
+### 1-2. Application Layer – Provided Services / Required Infra
+
+#### IEnvStatusQueryService (Provided by EnvStatusQueryService)
+
+```text
+EnvStatusView getCurrentEnvStatus(warehouseId: WarehouseId, zoneId?: ZoneId)
+
+EnvHistoryView getEnvHistory(
+  warehouseId: WarehouseId,
+  zoneId: ZoneId,
+  from: Timestamp,
+  to: Timestamp
+)
+```
+
+**Requires (downwards):**
+
+* `IEnvTimeseriesRepository`
+* `IWarehouseDeviceRepository`
+
+#### IZoneProfileService (Provided by ZoneProfileService)
+
+```text
+OperationResult defineZoneProfile(profile: ZoneProfile)
+ZoneProfile getZoneProfile(warehouseId: WarehouseId, zoneId: ZoneId)
+```
+
+**Requires:** `IZoneProfileRepository`
+
+#### IControlPolicyService (Provided by ControlPolicyService)
+
+(Ops에서 정책 계산·시뮬레이션 용도)
+
+```text
+ControlPolicyRange getPolicyRange(warehouseId: WarehouseId, zoneId: ZoneId)
+
+ControlSimulationResult simulateControl(
+  warehouseId: WarehouseId,
+  zoneId: ZoneId,
+  currentEnv: EnvSampleWithLocation
+)
+```
+
+**Requires:**
+
+* `IZoneProfileRepository`
+* `IEnvTimeseriesRepository`
+* `IControlHistoryRepository`
+* `IWarehouseDeviceRepository`
+* (옵션) `IKEPCOClient`
+
+#### IInventoryEventService
+
+```text
+OperationResult applyInOutEvent(event: InOutEvent)
+InOutHistoryView getInOutHistory(warehouseId: WarehouseId, range: TimeRange)
+```
+
+**Requires:** `IInventoryRepository`, `IWarehouseSystemClient`
+
+#### IAlarmRuleService
+
+```text
+OperationResult defineAlarmRule(rule: AlarmRule)
+AlarmRule getAlarmRule(ruleId: string)
+```
+
+**Requires:** `IAlarmRuleRepository`
+
+#### IDeviceConfigService
+
+```text
+OperationResult registerWarehouseDevice(device: WarehouseDevice)
+WarehouseDevice getWarehouseDevice(deviceId: DeviceId)
+List<WarehouseDevice> listDevices(warehouseId: WarehouseId)
+```
+
+**Requires:** `IWarehouseDeviceRepository`
+
+### 1-3. Infrastructure Layer – Provided / Required
+
+**Repositories (Provided)**
+
+```text
+IZoneProfileRepository
+  +save(profile: ZoneProfile): OperationResult
+  +find(warehouseId, zoneId): ZoneProfile?
+
+IWarehouseDeviceRepository
+  +save(device: WarehouseDevice): OperationResult
+  +find(deviceId): WarehouseDevice?
+  +listByWarehouse(warehouseId): List<WarehouseDevice>
+
+IInventoryRepository
+  +save(event: InOutEvent): OperationResult
+  +list(warehouseId, range): List<InOutEvent>
+
+IAlarmRuleRepository
+  +save(rule: AlarmRule): OperationResult
+  +find(ruleId): AlarmRule?
+```
+
+**TimeSeries (Provided)**
+
+```text
+IEnvTimeseriesRepository
+  +save(sample: EnvSampleWithLocation): OperationResult
+  +query(warehouseId, zoneId, range): List<EnvSampleWithLocation>
+
+IControlHistoryRepository
+  +save(history: ControlHistoryRecord): OperationResult
+  +list(warehouseId, range): List<ControlHistoryRecord>
+
+IDeviceStatusTimeseriesRepository
+  +save(status: DeviceStatus): OperationResult
+  +list(warehouseId, range): List<DeviceStatus>
+```
+
+**External Clients (Provided)**
+
+```text
+IWarehouseSystemClient
+  +notifyInOutSynced(event: InOutEvent): OperationResult
+
+IKEPCOClient
+  +getPowerUsage(warehouseId, range): PowerUsageView
+
+IPushClient
+  +send(message: PushMessage): PushStatus
+```
+
+**Required by Repos/Clients:** DB connection, HTTP 등 infra 디테일 (여기선 생략)
+
+---
+
+## 2. HVAC 서버
+
+핵심: 브로커 이벤트 → `HVACControlService` 콜백, 제조사별 제어.
+
+### 2-1. Presentation – Provided
+
+**IHVACControlAPI (HVACApiController)**
+
+```text
+OperationResult requestImmediateControl(warehouseId: WarehouseId)
+
+HVACControlStatusView getControlStatus(warehouseId: WarehouseId, zoneId?: ZoneId)
+```
+
+**IHVACStatusAPI**
+
+```text
+HVACControlStatusView getLastControlResult(commandId: CommandId)
+```
+
+### 2-2. Application – Provided / Required
+
+#### IHVACControlService (Provided by HVACControlService)
+
+```text
+OperationResult requestHVACControl(warehouseId: WarehouseId)
+
+/* 콜백: 브로커에서 직접 호출, Provided interface */
+onEnvSample(sensorId: SensorId, envData: EnvSample)         // from IEnvSampleEventHandler
+onItemEvent(event: InOutEvent)                              // from IInOutEventHandler
+```
+
+**Requires (downwards):**
+
+* `IEnvSampleSubscription` (for register)
+* `IInOutEventSubscription`
+* `IHVACDeviceConfigRepository`
+* `IPolicyReferenceRepository`
+* `ISetpointCalculationService`
+* `IDeviceCommandService`
+
+#### ISetpointCalculationService
+
+```text
+TargetControlCommandSet calculate(
+  env: EnvSampleWithLocation,
+  policy: ControlPolicyRange,
+  devices: List<WarehouseDevice>
+)
+```
+
+**Requires:** `IEnvTimeseriesRepository_HVAC` (history 기반 계산 시)
+
+#### IDeviceCommandService
+
+```text
+OperationResult executeCommands(commands: TargetControlCommandSet)
+```
+
+**Requires:**
+
+* `IDeviceCommandPublishing` (if via broker)
+* `ISamsungHVACClient`, `ILGHVACClient`
+* `IControlHistoryRepository_HVAC`
+
+#### IHVACStatusQueryService
+
+```text
+HVACControlStatusView getStatus(warehouseId: WarehouseId, zoneId?: ZoneId)
+HVACControlStatusView getByCommandId(commandId: CommandId)
+```
+
+**Requires:** `IControlHistoryRepository_HVAC`, `IHVACDeviceConfigRepository`
+
+### 2-3. Infrastructure – Provided / Callback
+
+**Kafka Gateway (Provided)**
+
+```text
+IEnvSampleSubscription
+  +registerEnvSampleHandler(h: IEnvSampleEventHandler): void
+
+IInOutEventSubscription
+  +registerInOutEventHandler(h: IInOutEventHandler): void
+
+IDeviceCommandPublishing
+  +publishDeviceCommand(cmd: TargetControlCommand): OperationResult
+```
+
+**HVAC DB (Provided)**
+
+```text
+IHVACDeviceConfigRepository
+  +findByWarehouse(warehouseId): List<WarehouseDevice>
+  +findById(deviceId): WarehouseDevice?
+
+IPolicyReferenceRepository
+  +getPolicyRange(warehouseId, zoneId): ControlPolicyRange?
+
+IEnvTimeseriesRepository_HVAC
+  +getLatestSample(warehouseId, zoneId): EnvSampleWithLocation?
+
+IControlHistoryRepository_HVAC
+  +save(record: ControlHistoryRecord): OperationResult
+  +findByCommandId(commandId): ControlHistoryRecord?
+  +list(warehouseId, range): List<ControlHistoryRecord>
+```
+
+**Vendor Clients (Provided)**
+
+```text
+ISamsungHVACClient
+  +sendCommands(commands: TargetControlCommandSet): OperationResult
+
+ILGHVACClient
+  +sendCommands(commands: TargetControlCommandSet): OperationResult
+```
+
+**Callback 사용**
+
+* `BrokerGatewayForHVAC` 는 실제 이벤트 시:
+
+  * `IEnvSampleEventHandler.onEnvSample(...)`
+  * `IInOutEventHandler.onItemEvent(...)`
+    호출 (상위 Provided 인터페이스).
+
+---
+
+## 3. Monitoring 서버
+
+Timer + Vendor API로 공조 장치 Heartbeat만 관리.
+
+### 3-1. Presentation – Provided
+
+**IMonitoringQueryAPI**
+
+```text
+List<DeviceStatus> getDeviceStatuses(warehouseId: WarehouseId)
+
+List<HeartbeatRecord> getHeartbeatHistory(
+  warehouseId: WarehouseId,
+  deviceId: DeviceId,
+  range: TimeRange
+)
+```
+
+**IAlarmQueryAPI**
+
+```text
+List<AlarmEvent> getActiveAlarms(warehouseId?: WarehouseId)
+List<AlarmEvent> getAlarmHistory(warehouseId?: WarehouseId, range?: TimeRange)
+```
+
+### 3-2. Application – Provided / Required
+
+#### I1MinTickListener (Provided by DeviceHealthCheckScheduler)
+
+```text
+on1MinTick(): void
+```
+
+#### IDeviceHealthCheckService
+
+```text
+checkSamsungDevices(): void
+checkLGDevices(): void
+```
+
+(실제 구현에선 제조사 파라미터 1개로 합쳐도 됨)
+
+**Requires:**
+
+* `IMonDeviceConfigRepository`
+* `ISamsungHVACStatusClient` / `ILGHVACStatusClient`
+* `IDeviceHeartbeatRepository`
+* `IAlarmManagementService` (DOWN or FAIL 시 알람 요청)
+
+#### IAlarmManagementService
+
+```text
+raiseDeviceDownAlarm(device: WarehouseDevice): AlarmEvent
+closeDeviceAlarmIfRecovered(device: WarehouseDevice): OperationResult
+List<AlarmEvent> getActiveAlarms(warehouseId?: WarehouseId)
+List<AlarmEvent> getAlarmHistory(warehouseId?: WarehouseId, range?: TimeRange)
+```
+
+**Requires:**
+
+* `IPushClient`
+* `IDeviceStatusHistoryRepository`
+
+#### IMonitoringQueryService
+
+```text
+List<DeviceStatus> getDeviceStatuses(warehouseId: WarehouseId)
+List<HeartbeatRecord> getHeartbeatHistory(
+  warehouseId: WarehouseId,
+  deviceId: DeviceId,
+  range: TimeRange
+)
+```
+
+**Requires:**
+
+* `IDeviceHeartbeatRepository`
+* `IDeviceStatusHistoryRepository`
+
+#### DeviceHealthCheckScheduler (Provided / Required)
+
+* **Provided:** `I1MinTickListener.on1MinTick()`
+* **Requires:** `I1MinTimerRegistration` (타이머 등록), `IDeviceHealthCheckService`
+
+### 3-3. Infrastructure – Provided / Callback
+
+**Timer**
+
+```text
+I1MinTimerRegistration
+  +register(listener: I1MinTickListener): void
+```
+
+Timer 엔진은 1분마다 `listener.on1MinTick()` 호출 (callback).
+
+**Repositories**
+
+```text
+IMonDeviceConfigRepository
+  +listSamsungDevices(): List<WarehouseDevice>
+  +listLGDevices(): List<WarehouseDevice>
+
+IDeviceHeartbeatRepository
+  +save(record: HeartbeatRecord): OperationResult
+  +list(warehouseId, deviceId, range): List<HeartbeatRecord>
+
+IDeviceStatusHistoryRepository
+  +save(status: DeviceStatus): OperationResult
+  +list(warehouseId?: WarehouseId, range?: TimeRange): List<DeviceStatus>
+```
+
+**Vendor Status Clients**
+
+```text
+ISamsungHVACStatusClient
+  +getStatus(device: WarehouseDevice): DeviceStatus
+
+ILGHVACStatusClient
+  +getStatus(device: WarehouseDevice): DeviceStatus
+```
+
+**Push**
+
+```text
+IPushClient
+  +send(message: PushMessage): PushStatus
+```
+
+---
+
+## 정리 포인트 (검토용)
+
+* 각 인터페이스는 **어느 레이어에서 제공(Provided)**, **위 레이어/서비스에서 무엇을 Require하는지**가 명확하게 갈린 상태.
+* UC 4.1.4.2.3 / 4.1.5.5 / 4.1.6.5의 플로우는:
+
+  * UC-01: `IEnvSampleSubscription` + `IEnvSampleEventHandler` / TS repo / PushClient 로 직접 매핑.
+  * UC-02: `IHVACControlService` + 정책/장치 repo + VendorClient.
+  * UC-03/04: `I1MinTimerRegistration` + `I1MinTickListener` + VendorStatusClient + TS repo.
+* 하위→상위 직접 의존은 전부 **콜백 인터페이스(상위 제공) 사용**으로 정리되어 있어, 피드백의 layered 규칙과도 충돌 없음.
+
+이 정도면 설계 리뷰 때 “각 UC가 어떤 컴포넌트/인터페이스를 통해 흘러가는지”를 코드 레벨까지 바로 보일 수 있을 거야.
+다음 단계에서 원하면, 이 정의들을 표 형태(Provided/Required matrix)로도 정리해 줄게.
 
