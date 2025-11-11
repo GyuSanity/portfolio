@@ -1,0 +1,636 @@
+좋다, 이제 딱 **UC-01~UC-04 에만 필요한 것만** 남긴 버전으로 정리해볼게.
+(말해준 것처럼 “공조/환경모니터링 서버가 와인 공조 서버에서 제어 규칙을 받아온다”는 의존성은 전부 제거하고, **정책/장치 정보는 자기 DB에서 직접 조회**하는 구조로 맞춰놨다.)
+
+아래에는:
+
+1. **서버별 레이어드 컴포넌트 구조**
+2. 각 컴포넌트가 **어떤 인터페이스를 Provided / Required** 하는지
+3. 그걸 바로 EA/PlantUML에 쓸 수 있는 **클래스/컴포넌트 다이어그램 코드 (UC1~4 관련 것만)**
+
+을 포함했다.
+
+---
+
+## 공통 전제 (UC-01~04에 필요한 것만)
+
+남겨진 공통 타입/역할:
+
+* EnvSample / EnvSampleWithLocation
+* ZoneProfile, ControlPolicyRange
+* WarehouseDevice
+* TargetControlCommand / ControlHistoryRecord
+* DeviceStatus / HeartbeatRecord
+* AlarmEvent, OperationResult
+* SensorId / WarehouseId / ZoneId / DeviceId / CommandId
+
+이외 관리용/인벤토리 등은 UC-01~04에서 안 쓰이므로 배제.
+
+---
+
+## 1. HVAC Server (UC-01 환경 모니터링 + UC-02 공조 제어)
+
+### 1.1 Presentation Layer
+
+**Component**
+
+* `HVACApiController`
+
+**Provided**
+
+* `IHVACControlAPI`
+
+  * `requestImmediateControl(warehouseId): OperationResult`
+  * `getControlStatus(warehouseId, zoneId): HVACControlStatusView`
+* `IHVACStatusAPI`
+
+  * `getLastControlResult(commandId): HVACControlStatusView`
+
+**Required**
+
+* `IHVACControlService`
+* `IHVACStatusQueryService`
+
+→ 외부에서 HTTP/REST(JSON)로 들어오는 엔드포인트를 이 두 인터페이스로 노출한다고 보면 된다.
+
+---
+
+### 1.2 Application Layer
+
+#### 1) `HVACControlService` (핵심 BL: UC-01 콜백 처리 + UC-02 제어)
+
+**Provided**
+
+* `IHVACControlService`
+
+  * `requestHVACControl(warehouseId): OperationResult`
+* `IEnvSampleEventHandler`
+
+  * `onEnvSample(sensorId, env: EnvSample)`
+    (Kafka → BrokerGateway → callback, UC-01)
+
+**Required**
+
+* `IEnvSampleSubscription` (브로커에 본인 핸들러 등록)
+* `IHVACDeviceConfigRepository` (센서 ↔ 창고/존/장치 매핑, 장치 목록 조회)
+* `IPolicyReferenceRepository` (공조 정책 범위)
+* `IEnvTimeseriesRepository_HVAC` (최근 측정 및 저장)
+* `ISetpointCalculationService` (제어값 계산)
+* `IDeviceCommandService` (제조사별 명령 실행)
+* `IControlHistoryRepository_HVAC` (제어 이력 기록/조회)
+* `IPushClient` (센서 오류, 제어 실패 알림; 필요 시)
+* `IAlarmManagementService` (센서/저장 실패 등 알람 연계; Cross-server call)
+
+---
+
+#### 2) `SetpointCalculationService`
+
+**Provided**
+
+* `ISetpointCalculationService`
+
+  * `calculate(env, policy, devices): TargetControlCommandSet`
+
+**Required**
+
+* `IEnvTimeseriesRepository_HVAC` (과거 추세 활용 시)
+
+---
+
+#### 3) `DeviceCommandService`
+
+**Provided**
+
+* `IDeviceCommandService`
+
+  * `executeCommands(cmds: TargetControlCommandSet): OperationResult`
+
+**Required**
+
+* `IDeviceCommandPublishing` (브로커 경유 방식 사용할 경우)
+* `ISamsungHVACClient`
+* `ILGHVACClient`
+* `IControlHistoryRepository_HVAC`
+
+---
+
+#### 4) `HVACStatusQueryService`
+
+**Provided**
+
+* `IHVACStatusQueryService`
+
+  * `getStatus(warehouseId, zoneId): HVACControlStatusView`
+  * `getByCommandId(commandId): HVACControlStatusView`
+
+**Required**
+
+* `IControlHistoryRepository_HVAC`
+* `IHVACDeviceConfigRepository`
+
+---
+
+### 1.3 Infrastructure Layer
+
+#### 1) `BrokerGatewayForHVAC`
+
+**Provided**
+
+* `IEnvSampleSubscription`
+
+  * `registerEnvSampleHandler(h: IEnvSampleEventHandler)`
+* `IDeviceCommandPublishing`
+
+  * `publishDeviceCommand(cmd: TargetControlCommand): OperationResult`
+
+**Required**
+
+* Kafka Client 라이브러리 (내부 infra)
+
+---
+
+#### 2) `HVACMasterDBAccess`
+
+**Provided**
+
+* `IHVACDeviceConfigRepository`
+
+  * `findBySensorId(sensorId): WarehouseDevice?`
+  * `findByWarehouse(warehouseId): List<WarehouseDevice>`
+  * `findById(deviceId): WarehouseDevice?`
+* `IPolicyReferenceRepository`
+
+  * `getPolicyRange(warehouseId, zoneId): ControlPolicyRange?`
+
+**Required**
+
+* RDB 접속
+
+---
+
+#### 3) `HVACTimeseriesDBAccess`
+
+**Provided**
+
+* `IEnvTimeseriesRepository_HVAC`
+
+  * `save(env: EnvSampleWithLocation): OperationResult`
+  * `getLatestSample(warehouseId, zoneId): EnvSampleWithLocation?`
+* `IControlHistoryRepository_HVAC`
+
+  * `save(record: ControlHistoryRecord): OperationResult`
+  * `findByCommandId(cmdId): ControlHistoryRecord?`
+  * `list(warehouseId, range): List<ControlHistoryRecord>`
+
+**Required**
+
+* TSDB 접속
+
+---
+
+#### 4) Vendor / Push
+
+**`SamsungHVACClient`**
+
+* Provided: `ISamsungHVACClient`
+
+  * `sendCommands(cmds): OperationResult`
+
+**`LGHVACClient`**
+
+* Provided: `ILGHVACClient`
+
+  * `sendCommands(cmds): OperationResult`
+
+**`PushClient`**
+
+* Provided: `IPushClient`
+
+  * `send(msg: PushMessage): PushStatus`
+
+---
+
+### 1.4 HVAC Server Diagram (UC-01/02 관련만)
+
+```plantuml
+@startuml
+skinparam componentStyle rectangle
+title HVAC Server (UC-01, UC-02 Only)
+
+package "Presentation" {
+  component HVACApiController
+
+  interface IHVACControlAPI {
+    +requestImmediateControl(warehouseId): OperationResult
+    +getControlStatus(warehouseId, zoneId): HVACControlStatusView
+  }
+  interface IHVACStatusAPI {
+    +getLastControlResult(commandId): HVACControlStatusView
+  }
+
+  HVACApiController -up-|> IHVACControlAPI
+  HVACApiController -up-|> IHVACStatusAPI
+
+  HVACApiController ..> IHVACControlService
+  HVACApiController ..> IHVACStatusQueryService
+}
+
+package "Application" {
+  interface IHVACControlService {
+    +requestHVACControl(warehouseId): OperationResult
+  }
+  interface IEnvSampleEventHandler {
+    +onEnvSample(sensorId, env: EnvSample)
+  }
+  interface IHVACStatusQueryService {
+    +getStatus(warehouseId, zoneId): HVACControlStatusView
+    +getByCommandId(commandId): HVACControlStatusView
+  }
+  interface ISetpointCalculationService {
+    +calculate(env, policy, devices): TargetControlCommandSet
+  }
+  interface IDeviceCommandService {
+    +executeCommands(cmds: TargetControlCommandSet): OperationResult
+  }
+  interface IAlarmManagementService {
+    +raiseDeviceDownAlarm(device)
+    +raiseUnknownSensorAlarm(sensorId)
+    +raiseEnvStoreFailureAlarm(sensorId)
+  }
+
+  component HVACControlService as HC
+  component HVACStatusQueryService as HQ
+  component SetpointCalculationService as CALC
+  component DeviceCommandService as DC
+
+  IHVACControlService <|-- HC
+  IEnvSampleEventHandler <|-- HC
+  IHVACStatusQueryService <|-- HQ
+  ISetpointCalculationService <|-- CALC
+  IDeviceCommandService <|-- DC
+
+  HC ..> IEnvSampleSubscription
+  HC ..> IHVACDeviceConfigRepository
+  HC ..> IPolicyReferenceRepository
+  HC ..> IEnvTimeseriesRepository_HVAC
+  HC ..> ISetpointCalculationService
+  HC ..> IDeviceCommandService
+  HC ..> IControlHistoryRepository_HVAC
+  HC ..> IPushClient
+  HC ..> IAlarmManagementService
+
+  HQ ..> IControlHistoryRepository_HVAC
+  HQ ..> IHVACDeviceConfigRepository
+
+  DC ..> IDeviceCommandPublishing
+  DC ..> ISamsungHVACClient
+  DC ..> ILGHVACClient
+  DC ..> IControlHistoryRepository_HVAC
+
+  CALC ..> IEnvTimeseriesRepository_HVAC
+}
+
+package "Infrastructure" {
+  interface IEnvSampleSubscription {
+    +registerEnvSampleHandler(h: IEnvSampleEventHandler)
+  }
+  interface IDeviceCommandPublishing {
+    +publishDeviceCommand(cmd: TargetControlCommand): OperationResult
+  }
+  component BrokerGatewayForHVAC as BG
+  BG -up-|> IEnvSampleSubscription
+  BG -up-|> IDeviceCommandPublishing
+
+  interface IHVACDeviceConfigRepository {
+    +findBySensorId(sensorId)
+    +findByWarehouse(warehouseId)
+    +findById(deviceId)
+  }
+  interface IPolicyReferenceRepository {
+    +getPolicyRange(warehouseId, zoneId)
+  }
+  interface IEnvTimeseriesRepository_HVAC {
+    +save(env)
+    +getLatestSample(warehouseId, zoneId)
+  }
+  interface IControlHistoryRepository_HVAC {
+    +save(record)
+    +findByCommandId(cmdId)
+    +list(warehouseId, range)
+  }
+
+  component HVACMasterDBAccess as DBM
+  component HVACTimeseriesDBAccess as DBT
+
+  DBM -up-|> IHVACDeviceConfigRepository
+  DBM -up-|> IPolicyReferenceRepository
+  DBT -up-|> IEnvTimeseriesRepository_HVAC
+  DBT -up-|> IControlHistoryRepository_HVAC
+
+  interface ISamsungHVACClient {
+    +sendCommands(cmds)
+  }
+  interface ILGHVACClient {
+    +sendCommands(cmds)
+  }
+  component SamsungHVACClient as VS
+  component LGHVACClient as VL
+  VS -up-|> ISamsungHVACClient
+  VL -up-|> ILGHVACClient
+
+  interface IPushClient {
+    +send(msg)
+  }
+  component PushClient as PUSH
+  PUSH -up-|> IPushClient
+}
+@enduml
+```
+
+---
+
+## 2. Monitoring Server (UC-03, UC-04 공조장치 모니터링)
+
+### 2.1 Presentation Layer
+
+**Component**
+
+* `MonitoringApiController`
+
+**Provided**
+
+* `IMonitoringQueryAPI`
+
+  * `getDeviceStatuses(warehouseId): List<DeviceStatus>`
+  * `getHeartbeatHistory(warehouseId, deviceId, range): List<HeartbeatRecord>`
+* `IAlarmQueryAPI`
+
+  * `getActiveAlarms(warehouseId?): List<AlarmEvent>`
+  * `getAlarmHistory(warehouseId?, range?): List<AlarmEvent>`
+
+**Required**
+
+* `IMonitoringQueryService`
+* `IAlarmManagementService`
+
+---
+
+### 2.2 Application Layer
+
+#### 1) `DeviceHealthCheckScheduler`
+
+**Provided**
+
+* `I1MinTickListener`
+
+  * `on1MinTick()`
+
+**Required**
+
+* `I1MinTimerRegistration`
+* `IDeviceHealthCheckService`
+
+---
+
+#### 2) `DeviceHealthCheckService`
+
+**Provided**
+
+* `IDeviceHealthCheckService`
+
+  * `checkSamsungDevices()`
+  * `checkLGDevices()`
+
+**Required**
+
+* `IMonDeviceConfigRepository` (벤더별 장치 목록)
+* `ISamsungHVACStatusClient`
+* `ILGHVACStatusClient`
+* `IDeviceHeartbeatRepository`
+* `IAlarmManagementService` (장치 DOWN 알람)
+
+---
+
+#### 3) `AlarmManagementService`
+
+**Provided**
+
+* `IAlarmManagementService`
+
+  * `raiseDeviceDownAlarm(device): AlarmEvent`
+  * `closeDeviceAlarmIfRecovered(device): OperationResult`
+  * `getActiveAlarms(warehouseId?): List<AlarmEvent>`
+  * `getAlarmHistory(warehouseId?, range?): List<AlarmEvent>`
+
+**Required**
+
+* `IPushClient`
+* `IDeviceStatusHistoryRepository`
+
+---
+
+#### 4) `MonitoringQueryService`
+
+**Provided**
+
+* `IMonitoringQueryService`
+
+  * `getDeviceStatuses(warehouseId): List<DeviceStatus>`
+  * `getHeartbeatHistory(warehouseId, deviceId, range): List<HeartbeatRecord>`
+
+**Required**
+
+* `IDeviceHeartbeatRepository`
+* `IDeviceStatusHistoryRepository`
+
+---
+
+### 2.3 Infrastructure Layer
+
+#### 1) `TimerGateway`
+
+**Provided**
+
+* `I1MinTimerRegistration`
+
+  * `register(listener: I1MinTickListener)`
+
+**Required**
+
+* OS/스케줄러
+
+---
+
+#### 2) `MonMasterDBAccess`
+
+**Provided**
+
+* `IMonDeviceConfigRepository`
+
+  * `listSamsungDevices(): List<WarehouseDevice>`
+  * `listLGDevices(): List<WarehouseDevice>`
+
+#### 3) `MonTimeseriesDBAccess`
+
+**Provided**
+
+* `IDeviceHeartbeatRepository`
+
+  * `save(record: HeartbeatRecord)`
+  * `list(warehouseId, deviceId, range)`
+* `IDeviceStatusHistoryRepository`
+
+  * `save(status: DeviceStatus)`
+  * `list(warehouseId?, range?)`
+
+---
+
+#### 4) Vendor Status / Push
+
+**`SamsungHVACStatusClient`**
+
+* Provided: `ISamsungHVACStatusClient`
+
+  * `getStatus(device): DeviceStatus`
+
+**`LGHVACStatusClient`**
+
+* Provided: `ILGHVACStatusClient`
+
+  * `getStatus(device): DeviceStatus`
+
+**`PushClient`**
+
+* Provided: `IPushClient`
+
+  * `send(msg): PushStatus`
+
+---
+
+### 2.4 Monitoring Server Diagram (UC-03/04 관련만)
+
+```plantuml
+@startuml
+skinparam componentStyle rectangle
+title Monitoring Server (UC-03, UC-04 Only)
+
+package "Presentation" {
+  component MonitoringApiController
+
+  interface IMonitoringQueryAPI {
+    +getDeviceStatuses(warehouseId)
+    +getHeartbeatHistory(warehouseId, deviceId, range)
+  }
+  interface IAlarmQueryAPI {
+    +getActiveAlarms(warehouseId)
+    +getAlarmHistory(warehouseId, range)
+  }
+
+  MonitoringApiController -up-|> IMonitoringQueryAPI
+  MonitoringApiController -up-|> IAlarmQueryAPI
+
+  MonitoringApiController ..> IMonitoringQueryService
+  MonitoringApiController ..> IAlarmManagementService
+}
+
+package "Application" {
+  interface I1MinTickListener {
+    +on1MinTick()
+  }
+  interface IDeviceHealthCheckService {
+    +checkSamsungDevices()
+    +checkLGDevices()
+  }
+  interface IAlarmManagementService {
+    +raiseDeviceDownAlarm(device)
+    +closeDeviceAlarmIfRecovered(device)
+    +getActiveAlarms(warehouseId)
+    +getAlarmHistory(warehouseId, range)
+  }
+  interface IMonitoringQueryService {
+    +getDeviceStatuses(warehouseId)
+    +getHeartbeatHistory(warehouseId, deviceId, range)
+  }
+
+  component DeviceHealthCheckScheduler as SCHED
+  component DeviceHealthCheckService as DHS
+  component AlarmManagementService as ALARM
+  component MonitoringQueryService as MQ
+
+  I1MinTickListener <|-- SCHED
+  IDeviceHealthCheckService <|-- DHS
+  IAlarmManagementService <|-- ALARM
+  IMonitoringQueryService <|-- MQ
+
+  SCHED ..> I1MinTimerRegistration
+  SCHED ..> IDeviceHealthCheckService
+
+  DHS ..> IMonDeviceConfigRepository
+  DHS ..> ISamsungHVACStatusClient
+  DHS ..> ILGHVACStatusClient
+  DHS ..> IDeviceHeartbeatRepository
+  DHS ..> IAlarmManagementService
+
+  ALARM ..> IPushClient
+  ALARM ..> IDeviceStatusHistoryRepository
+
+  MQ ..> IDeviceHeartbeatRepository
+  MQ ..> IDeviceStatusHistoryRepository
+}
+
+package "Infrastructure" {
+  interface I1MinTimerRegistration {
+    +register(listener: I1MinTickListener)
+  }
+  component TimerGateway as TG
+  TG -up-|> I1MinTimerRegistration
+
+  interface IMonDeviceConfigRepository {
+    +listSamsungDevices()
+    +listLGDevices()
+  }
+  interface IDeviceHeartbeatRepository {
+    +save(record)
+    +list(warehouseId, deviceId, range)
+  }
+  interface IDeviceStatusHistoryRepository {
+    +save(status)
+    +list(warehouseId, range)
+  }
+
+  component MonMasterDBAccess as MDB
+  component MonTimeseriesDBAccess as MTDB
+
+  MDB -up-|> IMonDeviceConfigRepository
+  MTDB -up-|> IDeviceHeartbeatRepository
+  MTDB -up-|> IDeviceStatusHistoryRepository
+
+  interface ISamsungHVACStatusClient {
+    +getStatus(device)
+  }
+  interface ILGHVACStatusClient {
+    +getStatus(device)
+  }
+  component SamsungHVACStatusClient as MS
+  component LGHVACStatusClient as ML
+  MS -up-|> ISamsungHVACStatusClient
+  ML -up-|> ILGHVACStatusClient
+
+  interface IPushClient {
+    +send(msg)
+  }
+  component PushClient as MPUSH
+  MPUSH -up-|> IPushClient
+}
+@enduml
+```
+
+---
+
+이 상태가:
+
+* UC-01~04에 안 쓰이는 컴포넌트/인터페이스는 전부 걷어낸 상태이고,
+* HVAC/Monitoring 서버는 **DB에서 직접 정책·장치 정보 읽고** 동작 (Ops 서버 의존 X),
+* 각 레이어 컴포넌트마다 **위에 Provided, 아래로 Required 인터페이스**가 Layered 규칙대로 연결되어 있어서
+* 그대로 EA 다이어그램/보고서에 넣어도 논리적으로 깔끔하게 맞는다.
+
+만약 “이 중에서도 더 줄이고 싶다”면, UC별로 실제 호출 안 나오는 인터페이스 라인까지 같이 체크해서 한 번 더 슬림하게 정리해 줄 수 있어.
